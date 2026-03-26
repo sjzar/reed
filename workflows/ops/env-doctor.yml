@@ -1,0 +1,112 @@
+name: env-doctor
+
+description: >
+  Verify required CLIs, versions, and environment variables for a project.
+
+inputs:
+  checklist:
+    type: string
+    default: ""
+    description: "Path to checklist file (one item per line: 'cmd:version' or 'env:VAR_NAME'). Auto-detects if empty."
+
+jobs:
+  check:
+    steps:
+      - id: verify
+        uses: shell
+        run: |
+          checklist="${{ inputs.checklist }}"
+          echo "=== Environment Doctor ==="
+          echo ""
+
+          pass=0
+          fail=0
+
+          check_cmd() {
+            local cmd="$1"
+            local ver_flag="${2:---version}"
+            if command -v "$cmd" >/dev/null 2>&1; then
+              version=$($cmd $ver_flag 2>&1 | head -1)
+              echo "  [OK]   $cmd: $version"
+              pass=$((pass + 1))
+            else
+              echo "  [FAIL] $cmd: not found"
+              fail=$((fail + 1))
+            fi
+          }
+
+          check_env() {
+            local var="$1"
+            if [ -n "${!var+x}" ]; then
+              echo "  [OK]   \$$var is set"
+              pass=$((pass + 1))
+            else
+              echo "  [FAIL] \$$var is not set"
+              fail=$((fail + 1))
+            fi
+          }
+
+          if [ -n "$checklist" ] && [ -f "$checklist" ]; then
+            echo "--- Checklist: $checklist ---"
+            while IFS= read -r line; do
+              line=$(echo "$line" | tr -d '[:space:]')
+              [ -z "$line" ] && continue
+              [[ "$line" == \#* ]] && continue
+              case "$line" in
+                env:*) check_env "${line#env:}" ;;
+                *) check_cmd "${line%%:*}" ;;
+              esac
+            done < "$checklist"
+          else
+            echo "--- Auto-detect ---"
+            echo ""
+            echo "=== Common Tools ==="
+            check_cmd git
+            check_cmd curl
+            check_cmd jq
+
+            # Detect project type and check relevant tools
+            if [ -f "go.mod" ]; then
+              echo ""
+              echo "=== Go Project ==="
+              check_cmd go
+              check_cmd golangci-lint
+              check_cmd govulncheck
+            fi
+            if [ -f "package.json" ]; then
+              echo ""
+              echo "=== Node Project ==="
+              check_cmd node
+              check_cmd npm
+              check_cmd npx
+            fi
+            if [ -f "requirements.txt" ] || [ -f "pyproject.toml" ]; then
+              echo ""
+              echo "=== Python Project ==="
+              check_cmd python3
+              check_cmd pip3 "-V"
+            fi
+            if [ -f "Cargo.toml" ]; then
+              echo ""
+              echo "=== Rust Project ==="
+              check_cmd rustc
+              check_cmd cargo
+            fi
+            if [ -f "docker-compose.yml" ] || [ -f "Dockerfile" ]; then
+              echo ""
+              echo "=== Docker ==="
+              check_cmd docker
+              check_cmd docker-compose
+            fi
+          fi
+
+          echo ""
+          echo "=== Summary ==="
+          echo "Passed: $pass"
+          echo "Failed: $fail"
+          [ "$fail" -gt 0 ] && echo "STATUS: ISSUES FOUND" || echo "STATUS: ALL GOOD"
+    outputs:
+      report: ${{ steps.verify.outputs.stdout }}
+
+outputs:
+  report: ${{ jobs.check.outputs.report }}

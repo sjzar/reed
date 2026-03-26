@@ -1,0 +1,62 @@
+name: uptime-probe
+
+description: >
+  Probe multiple URLs, record latency and status.
+
+inputs:
+  urls:
+    type: string
+    required: true
+    description: "Comma-separated URLs to probe"
+  timeout:
+    type: integer
+    default: 10
+    description: "Request timeout in seconds"
+
+jobs:
+  probe:
+    steps:
+      - id: check
+        uses: shell
+        run: |
+          urls="${{ inputs.urls }}"
+          timeout=${{ inputs.timeout }}
+          echo "=== Uptime Probe ==="
+          echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo ""
+
+          up=0
+          down=0
+
+          printf "%-8s  %-6s  %-10s  %s\n" "STATUS" "CODE" "LATENCY" "URL"
+          printf "%-8s  %-6s  %-10s  %s\n" "------" "----" "-------" "---"
+
+          IFS=',' read -ra ADDRS <<< "$urls"
+          for url in "${ADDRS[@]}"; do
+            url=$(echo "$url" | tr -d ' ')
+            [ -z "$url" ] && continue
+
+            result=$(curl -s -o /dev/null -w "%{http_code} %{time_total}" --max-time "$timeout" "$url" 2>/dev/null)
+            code=$(echo "$result" | awk '{print $1}')
+            latency=$(echo "$result" | awk '{printf "%.0fms", $2 * 1000}')
+
+            if [ -z "$code" ] || [ "$code" = "000" ]; then
+              printf "%-8s  %-6s  %-10s  %s\n" "DOWN" "---" "timeout" "$url"
+              down=$((down + 1))
+            elif [ "$code" -ge 200 ] && [ "$code" -lt 400 ]; then
+              printf "%-8s  %-6s  %-10s  %s\n" "UP" "$code" "$latency" "$url"
+              up=$((up + 1))
+            else
+              printf "%-8s  %-6s  %-10s  %s\n" "DOWN" "$code" "$latency" "$url"
+              down=$((down + 1))
+            fi
+          done
+
+          echo ""
+          echo "=== Summary ==="
+          echo "Up: $up | Down: $down | Total: $((up + down))"
+    outputs:
+      report: ${{ steps.check.outputs.stdout }}
+
+outputs:
+  report: ${{ jobs.probe.outputs.report }}

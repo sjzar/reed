@@ -1,0 +1,88 @@
+name: parallel
+
+description: >
+  Three independent checks run concurrently, then a summary job fans in
+  all results. Demonstrates parallel DAG execution and multi-parent output passing.
+
+jobs:
+  check_disk:
+    steps:
+      - id: disk
+        uses: shell
+        run: |
+          echo "=== Disk Check ==="
+          usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%')
+          avail=$(df -h / 2>/dev/null | awk 'NR==2 {print $4}')
+          echo "Usage: ${usage}%"
+          echo "Available: ${avail}"
+          if [ -n "$usage" ] && [ "$usage" -gt 90 ]; then
+            echo "Status: WARNING"
+          else
+            echo "Status: OK"
+          fi
+    outputs:
+      result: ${{ steps.disk.outputs.stdout }}
+
+  check_network:
+    steps:
+      - id: net
+        uses: shell
+        run: |
+          echo "=== Network Check ==="
+          if curl -s --max-time 5 -o /dev/null -w '%{http_code}' https://example.com | grep -q "200"; then
+            echo "Internet: reachable"
+            echo "Status: OK"
+          else
+            echo "Internet: unreachable"
+            echo "Status: WARNING"
+          fi
+    outputs:
+      result: ${{ steps.net.outputs.stdout }}
+
+  check_tools:
+    steps:
+      - id: tools
+        uses: shell
+        run: |
+          echo "=== Tools Check ==="
+          missing=0
+          for cmd in git curl jq; do
+            if command -v "$cmd" >/dev/null 2>&1; then
+              echo "$cmd: $(command -v $cmd)"
+            else
+              echo "$cmd: MISSING"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "$missing" -gt 0 ]; then
+            echo "Status: WARNING ($missing missing)"
+          else
+            echo "Status: OK"
+          fi
+    outputs:
+      result: ${{ steps.tools.outputs.stdout }}
+
+  summary:
+    needs: [check_disk, check_network, check_tools]
+    steps:
+      - id: merge
+        uses: shell
+        run: |
+          echo "=============================="
+          echo "  Parallel Health Summary"
+          echo "  $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "=============================="
+          echo ""
+          echo "${{ jobs.check_disk.outputs.result }}"
+          echo ""
+          echo "${{ jobs.check_network.outputs.result }}"
+          echo ""
+          echo "${{ jobs.check_tools.outputs.result }}"
+          echo ""
+          echo "=============================="
+          echo "All checks complete."
+    outputs:
+      report: ${{ steps.merge.outputs.stdout }}
+
+outputs:
+  report: ${{ jobs.summary.outputs.report }}

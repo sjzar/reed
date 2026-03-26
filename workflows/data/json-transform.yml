@@ -1,0 +1,82 @@
+name: json-transform
+
+description: >
+  Transform JSON data using natural language instructions. The agent generates
+  a jq expression, then shell applies it.
+
+inputs:
+  input_file:
+    type: string
+    required: true
+    description: "Path to the input JSON file"
+  instruction:
+    type: string
+    required: true
+    description: "Natural language description of the desired transformation"
+  output_file:
+    type: string
+    default: ""
+    description: "Output file path (prints to stdout if empty)"
+
+agents:
+  jq_expert:
+    system_prompt: |
+      You are a jq expert. Given a JSON sample and a transformation instruction,
+      output ONLY the jq filter expression — nothing else. No explanation,
+      no markdown, no backticks. Just the raw jq expression on a single line.
+
+      Examples of valid output:
+      .[] | {name, age}
+      [.items[] | select(.active == true)]
+      group_by(.category) | map({key: .[0].category, count: length})
+
+jobs:
+  preview:
+    steps:
+      - id: sample
+        uses: shell
+        run: head -100 "${{ inputs.input_file }}"
+    outputs:
+      sample: ${{ steps.sample.outputs.stdout }}
+
+  plan:
+    needs: [preview]
+    steps:
+      - id: jq_filter
+        uses: agent
+        with:
+          agent: jq_expert
+          prompt: |
+            JSON sample:
+            ```json
+            ${{ jobs.preview.outputs.sample }}
+            ```
+
+            Transformation: ${{ inputs.instruction }}
+
+            Output only the jq filter expression.
+    outputs:
+      filter: ${{ steps.jq_filter.outputs.output }}
+
+  apply:
+    needs: [plan]
+    steps:
+      - id: transform
+        uses: shell
+        run: |
+          filter='${{ jobs.plan.outputs.filter }}'
+          input="${{ inputs.input_file }}"
+          output_file="${{ inputs.output_file }}"
+          echo "=== Applying jq filter: $filter ==="
+          if [ -n "$output_file" ]; then
+            jq "$filter" "$input" > "$output_file"
+            echo "Output written to: $output_file"
+          else
+            jq "$filter" "$input"
+          fi
+    outputs:
+      result: ${{ steps.transform.outputs.stdout }}
+
+outputs:
+  filter: ${{ jobs.plan.outputs.filter }}
+  result: ${{ jobs.apply.outputs.result }}

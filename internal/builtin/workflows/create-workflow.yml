@@ -1,0 +1,444 @@
+name: create-workflow
+
+description: >
+  Generate a Reed workflow YAML file from a natural language description.
+
+inputs:
+  prompt:
+    type: string
+    required: true
+    description: "Natural language description of the desired workflow"
+
+agents:
+  planner:
+    system_prompt: |
+      You are a Reed workflow generator. Create well-structured Reed workflow
+      YAML files based on user descriptions.
+
+      RULES:
+      1. Generate a single .yml file in the current working directory.
+      2. Choose a descriptive filename (e.g., "deploy.yml", "test-runner.yml").
+      3. The generated workflow must be valid Reed DSL — read the reed-dsl skill carefully.
+      4. Use the write tool to create the file. After writing, briefly explain what it does.
+      5. NEVER include a `model` field in agent definitions unless the user explicitly requests one.
+
+      SELF-CHECK (verify before writing):
+      - No invented top-level fields — only fields listed in the DSL reference.
+      - Every `run:` step has a `uses:` (shell, bash, or run). Bare `run:` without `uses:` fails.
+      - Every referenced job, step, agent, and skill actually exists in the workflow.
+      - Workflow `outputs:` use `jobs.<id>.outputs.<key>` — no cross-job step piercing.
+      - Use correct worker output keys: shell→stdout, agent→output, http→body.
+      - `session_key` and `session_id` are mutually exclusive.
+      - Prefer explicit step `id:` when downstream expressions reference that step.
+      - Choose the simplest worker: shell for commands, http for API calls, agent only when reasoning/tools are needed.
+      - If unsure about DSL validity, re-read the skill reference before writing.
+
+    skills:
+      - reed-dsl
+
+skills:
+  reed-dsl:
+    resources:
+      - path: "SKILL.md"
+        content: |
+          ---
+          name: reed-dsl
+          description: "Reed workflow DSL reference for generating valid workflows"
+          allowed_tools: ["write", "bash"]
+          ---
+
+          # Reed Workflow DSL Reference
+
+          ## Hard Rules (violations produce invalid workflows)
+
+          - `run:` REQUIRES `uses: shell` (or `bash` / `run`). Bare `run:` without `uses:` fails at runtime.
+          - `secrets:` is NOT a workflow field. Unknown top-level fields are silently ignored, not rejected.
+          - Workflow `outputs:` must use `${{ jobs.<id>.outputs.<key> }}` — no cross-job step piercing.
+          - Use correct worker output keys (see Worker Output Keys table below).
+          - `session_key` and `session_id` are mutually exclusive.
+          - Never hardcode `model:` in agents unless the user explicitly requests a specific model.
+          - Prefer explicit step `id:` when downstream expressions reference that step.
+          - Choose simplest worker: `shell` for commands, `http` for API calls, `agent` only when reasoning/tools needed.
+
+          ## Top-Level Fields
+
+          | Field | Type | Description |
+          |-------|------|-------------|
+          | `name` | string | Workflow name |
+          | `app` | string | Application name |
+          | `version` | string | Version string |
+          | `description` | string | Human-readable description |
+          | `tool_access` | string | `workdir` (default) or `full` |
+          | `run_jobs` | []string | Default DAG entrypoint filter (list of job IDs) |
+          | `metadata` | map | Opaque metadata |
+          | `inputs` | map | Workflow inputs |
+          | `outputs` | map | Workflow outputs (must reference `jobs.<id>.outputs.<key>`) |
+          | `env` | map | Environment variables. Secrets via `${{ secrets.name }}` |
+          | `agents` | map | Agent definitions |
+          | `skills` | map | Inline skill definitions |
+          | `mcp_servers` | map | MCP server configs (Reed as client) |
+          | `on` | object | Trigger config (cli, service, schedule) |
+          | `jobs` | map | Job definitions (DAG) |
+
+          ## Trigger Modes (`on` block)
+
+          Rules: `cli` and `service` mutually exclusive; `cli` and `schedule` mutually exclusive; `service` and `schedule` can coexist. No `on` block implies `on: { cli: {} }`.
+
+          ### CLI (default)
+          ```yaml
+          on:
+            cli:
+              commands:
+                build:
+                  description: "Run build"
+                  run_jobs: [compile, test]
+          ```
+
+          ### Service (daemon)
+          ```yaml
+          on:
+            service:
+              port: 8080          # required, must be > 0
+              http:
+                - path: /webhook
+                  method: POST
+                  run_jobs: [process]
+                  async: true       # optional, non-blocking response
+              mcp:
+                - name: my-tool
+                  description: "Tool description"
+                  run_jobs: [handle]
+          ```
+
+          ### Schedule
+          ```yaml
+          on:
+            schedule:
+              - cron: "0 9 * * *"
+                run_jobs: [daily_report]
+          ```
+
+          ### Concurrency (per HTTP route)
+          ```yaml
+          on:
+            service:
+              port: 8080
+              http:
+                - path: /deploy
+                  method: POST
+                  run_jobs: [deploy]
+                  concurrency:
+                    group: "deploy-${{ inputs.env }}"
+                    behavior: queue     # queue, skip, or replace-pending
+          ```
+
+          ## Inputs
+
+          ```yaml
+          inputs:
+            name:
+              type: string          # string, number, boolean, integer, media, []media
+              required: true
+              default: "world"
+              description: "..."
+          ```
+
+          ## Jobs (DAG)
+
+          ```yaml
+          jobs:
+            setup:
+              steps: [...]
+              outputs:
+                config: "${{ steps.load.outputs.stdout }}"
+            build:
+              needs: [setup]        # DAG dependency. Cycles rejected.
+              if: "${{ jobs.setup.outputs.config != '' }}"
+              steps: [...]
+          ```
+
+          ## Steps
+
+          | Field | Type | Description |
+          |-------|------|-------------|
+          | `id` | string | Step identifier (auto-generated step_0..N if omitted) |
+          | `uses` | string | **Required for execution**: `shell`, `bash`, `run`, `agent`, `http` |
+          | `run` | string | Shell command (sugar for `with.run`; still needs `uses: shell`) |
+          | `with` | map | Worker-specific parameters |
+          | `if` | string | Conditional: `${{ expr }}` |
+          | `timeout` | int | Seconds (0 = default) |
+          | `workdir` | string | Working directory |
+          | `shell` | string | Shell type: bash, sh, zsh, powershell, cmd |
+          | `env` | map | Step-level env vars |
+          | `background` | bool | Run as background process |
+
+          ### Shell Step (`uses: shell` / `bash` / `run`)
+          ```yaml
+          - id: compile
+            uses: shell
+            run: "go build ./..."
+            env:
+              GOOS: linux
+            timeout: 300
+          ```
+
+          ### Agent Step (`uses: agent`)
+          ```yaml
+          - id: chat
+            uses: agent
+            with:
+              agent: assistant          # required — references agents block
+              prompt: "..."             # user message
+              session_key: "main"       # session continuity (mutually exclusive with session_id)
+              namespace: "my-app"       # session namespace
+          ```
+
+          Full agent `with` parameters:
+
+          | Param | Type | Description |
+          |-------|------|-------------|
+          | `agent` | string | Agent ID (references `agents` block) |
+          | `prompt` | string | User message |
+          | `session_key` | string | Session continuity key |
+          | `session_id` | string | Explicit session UUID (mutually exclusive with session_key) |
+          | `namespace` | string | Session namespace |
+          | `tools` | []string | Explicit tool list (overrides defaults) |
+          | `max_iterations` | int | Agent loop limit |
+          | `thinking_level` | string | low / medium / high |
+          | `max_tokens` | int | Max response tokens |
+          | `temperature` | float | LLM temperature |
+          | `top_p` | float | Top-p sampling |
+          | `timeout_ms` | int | Agent timeout in milliseconds |
+          | `profile` | string | Named profile |
+          | `prompt_mode` | string | Prompt assembly mode |
+          | `schema` | map | Structured output schema |
+          | `extra_params` | map | Additional LLM params |
+
+          ### HTTP Step (`uses: http`)
+          ```yaml
+          - id: call-api
+            uses: http
+            with:
+              url: "https://api.example.com/data"
+              method: GET
+              headers:
+                Authorization: "Bearer ${{ secrets.token }}"
+              body: '{"key": "value"}'
+              output_file: "/tmp/result.json"
+              success_on_http_error: false
+          ```
+
+          ### Background Step
+          ```yaml
+          - id: server
+            uses: shell
+            run: "python -m http.server 8000"
+            background: true
+          ```
+
+          ## Worker Output Keys
+
+          | Worker | Key | Type | Notes |
+          |--------|-----|------|-------|
+          | **shell** | `stdout` | string | Captured stdout |
+          | | `stderr` | string | Captured stderr |
+          | | `duration` | string | Elapsed time |
+          | | `result` | any | Auto-parsed JSON if stdout is valid JSON object/array |
+          | **agent** | `output` | string | Agent response text |
+          | | `iterations` | int | Conversation iterations |
+          | | `total_tokens` | int | Total token usage |
+          | | `stop_reason` | string | Why agent stopped |
+          | **http** | `code` | int | HTTP status code |
+          | | `headers` | map | Response headers |
+          | | `body` | string | Response body (if no output_file) |
+          | | `duration` | string | Elapsed time |
+          | | `filepath` | string | Downloaded file path (if output_file set) |
+          | | `result` | any | Auto-parsed JSON if body is valid JSON object/array |
+
+          ## Expressions
+
+          All expressions use `${{ ... }}` delimiters. Three rendering modes:
+          1. **Raw literal**: no `${{ }}` → string as-is
+          2. **Exact expression**: entire value is `${{ expr }}` → native type (bool, int, etc.)
+          3. **String interpolation**: mixed text + `${{ }}` → always string
+
+          Available contexts:
+          - `inputs.<name>` — workflow input values
+          - `env.<NAME>` — environment variables
+          - `secrets.<name>` — managed externally, accessed via expression
+          - `jobs.<id>.outputs.<key>` — cross-job outputs
+          - `steps.<id>.outputs.<key>` — within same job only
+
+          Key functions:
+          - `fromJson(str)` — parse JSON string → dot-accessible object
+          - `toJson(obj)` — serialize to JSON string
+          - `default(expr, fallback)` — fallback for missing values
+          - `trim()`, `upper()`, `lower()`, `split()`, `join()`
+          - `sha256()`, `now()`, `yesterday()`, `beginningOf()`, `format()`
+          - Null coalescing: `${{ env.VAR ?? 'fallback' }}`
+
+          Pattern: use `fromJson()` on structured agent output for downstream dot-access:
+          ```yaml
+          outputs:
+            data: "${{ fromJson(steps.extract.outputs.output) }}"
+          # then: ${{ jobs.parse.outputs.data.fieldName }}
+          ```
+
+          ## Agents
+
+          ```yaml
+          agents:
+            assistant:
+              system_prompt: |
+                You are a helpful assistant.
+              skills: [my-skill]
+              max_iterations: 20
+              temperature: 0.7        # optional LLM temperature
+              thinking_level: medium   # low, medium, high
+          ```
+
+          `model` is optional. If omitted, the user's configured default is used.
+
+          ## Skills (inline)
+
+          ```yaml
+          skills:
+            my-skill:
+              resources:                # mutually exclusive with `uses`
+                - path: "SKILL.md"      # exactly one root SKILL.md required
+                  content: |
+                    ---
+                    name: my-skill
+                    description: "Skill description"
+                    allowed_tools: ["bash", "read"]
+                    ---
+                    Skill instructions here.
+          ```
+
+          Constraints: `uses` and `resources` are mutually exclusive. Resources must include exactly one root-level `SKILL.md`. No nested `SKILL.md`, no `..` path traversal.
+
+          ## Built-in Tools
+
+          `read`, `write`, `edit`, `ls`, `search`, `bash`, `spawn_subagent`
+
+          ## MCP Servers (Reed as client)
+
+          ```yaml
+          mcp_servers:
+            my-server:
+              transport: stdio
+              command: npx
+              args: ["-y", "@some/mcp-server"]
+              env:
+                API_KEY: "${{ secrets.api_key }}"
+          ```
+
+          ## Examples
+
+          ### 1. Simple CLI
+          ```yaml
+          name: hello
+          inputs:
+            name:
+              type: string
+              default: world
+          jobs:
+            greet:
+              steps:
+                - id: say
+                  uses: shell
+                  run: echo "Hello, ${{ inputs.name }}!"
+              outputs:
+                message: "${{ steps.say.outputs.stdout }}"
+          ```
+
+          ### 2. Agent Workflow
+          ```yaml
+          name: code-review
+          tool_access: full
+          agents:
+            reviewer:
+              system_prompt: "Review code changes for bugs and style issues."
+          jobs:
+            review:
+              steps:
+                - id: analyze
+                  uses: agent
+                  with:
+                    agent: reviewer
+                    prompt: "Review the latest changes in this repo."
+                    session_key: review
+              outputs:
+                feedback: "${{ steps.analyze.outputs.output }}"
+          ```
+
+          ### 3. Multi-Job DAG
+          ```yaml
+          name: build-and-deploy
+          inputs:
+            env:
+              type: string
+              default: staging
+          jobs:
+            build:
+              steps:
+                - id: compile
+                  uses: shell
+                  run: make build
+              outputs:
+                artifact: "${{ steps.compile.outputs.stdout }}"
+            test:
+              needs: [build]
+              steps:
+                - id: run-tests
+                  uses: shell
+                  run: make test
+            deploy:
+              needs: [build, test]
+              if: "${{ inputs.env == 'production' }}"
+              steps:
+                - id: push
+                  uses: shell
+                  run: "deploy.sh ${{ jobs.build.outputs.artifact }}"
+          ```
+
+          ### 4. Service Workflow
+          ```yaml
+          name: webhook-handler
+          on:
+            service:
+              port: 8080
+              http:
+                - path: /hook
+                  method: POST
+                  run_jobs: [process]
+          jobs:
+            process:
+              steps:
+                - id: handle
+                  uses: shell
+                  run: "echo 'Received webhook'"
+          ```
+
+          ## Closing Checklist
+
+          Before finalizing, verify:
+          - [ ] Every `run:` has a `uses:` (shell/bash/run)
+          - [ ] No invented top-level fields (no `secrets:`, etc.)
+          - [ ] Output expressions use correct worker keys (stdout/output/body)
+          - [ ] All referenced jobs, steps, agents, and skills exist
+          - [ ] `session_key` and `session_id` not used together
+          - [ ] No hardcoded `model:` unless user requested it
+
+jobs:
+  generate:
+    steps:
+      - id: plan
+        uses: agent
+        with:
+          agent: planner
+          prompt: |
+            ${{ inputs.prompt }}
+
+            Generate a Reed workflow YAML file for this request.
+            Write the file to the current directory with an appropriate name.

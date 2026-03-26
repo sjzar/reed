@@ -1,0 +1,69 @@
+name: mcp-tools
+
+description: >
+  Expose local file search, read, and command execution as MCP tools.
+  Other MCP clients can connect to this service to access local resources.
+
+on:
+  service:
+    port: 8402
+    mcp:
+      - name: search_files
+        description: "Search for files by name pattern in the working directory"
+        inputs:
+          pattern:
+            type: string
+            description: "Glob pattern to search for (e.g., '*.go', 'src/**/*.ts')"
+          path:
+            type: string
+            description: "Directory to search in (default: working directory)"
+        outputs:
+          result: ${{ jobs.search.outputs.result }}
+        run_jobs: [search]
+      - name: read_file
+        description: "Read the contents of a file"
+        inputs:
+          path:
+            type: string
+            description: "Path to the file to read"
+        outputs:
+          content: ${{ jobs.read.outputs.content }}
+        run_jobs: [read]
+      - name: run_command
+        description: "Execute a shell command in the working directory"
+        inputs:
+          command:
+            type: string
+            description: "Shell command to execute"
+        outputs:
+          output: ${{ jobs.execute.outputs.output }}
+        run_jobs: [execute]
+
+jobs:
+  search:
+    steps:
+      - id: find
+        uses: shell
+        run: |
+          pattern="${{ inputs.pattern }}"
+          path="${{ inputs.path }}"
+          [ -z "$path" ] && path="."
+          find "$path" -name "$pattern" -not -path '*/.git/*' -not -path '*/node_modules/*' 2>/dev/null | head -100
+    outputs:
+      result: ${{ steps.find.outputs.stdout }}
+
+  read:
+    steps:
+      - id: cat
+        uses: shell
+        run: cat "${{ inputs.path }}"
+    outputs:
+      content: ${{ steps.cat.outputs.stdout }}
+
+  execute:
+    steps:
+      - id: cmd
+        uses: shell
+        run: ${{ inputs.command }}
+    outputs:
+      output: ${{ steps.cmd.outputs.stdout }}

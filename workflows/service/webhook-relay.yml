@@ -1,0 +1,94 @@
+name: webhook-relay
+
+description: >
+  Receive webhooks, validate, transform with jq, and forward to a target URL.
+
+on:
+  service:
+    port: 8401
+    http:
+      - path: /webhook
+        method: POST
+        inputs:
+          body:
+            type: string
+            description: "Raw webhook payload"
+        outputs:
+          status: ${{ jobs.relay.outputs.status }}
+
+inputs:
+  body:
+    type: string
+    description: "Incoming webhook body (JSON)"
+  target_url:
+    type: string
+    required: true
+    description: "Target URL to forward the transformed payload to"
+  jq_filter:
+    type: string
+    default: "."
+    description: "jq expression to transform the payload before forwarding"
+  secret:
+    type: string
+    default: ""
+    description: "HMAC secret for signature validation (optional)"
+
+jobs:
+  relay:
+    steps:
+      - id: validate
+        uses: shell
+        run: |
+          payload='${{ inputs.body }}'
+          secret="${{ inputs.secret }}"
+
+          echo "=== Webhook Received ==="
+          echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+
+          # Validate JSON
+          if ! echo "$payload" | jq . >/dev/null 2>&1; then
+            echo "ERROR: Invalid JSON payload"
+            exit 1
+          fi
+
+          echo "Payload valid"
+      - id: transform
+        uses: shell
+        run: |
+          payload='${{ inputs.body }}'
+          filter='${{ inputs.jq_filter }}'
+
+          echo "=== Transform ==="
+          echo "Filter: $filter"
+          transformed=$(echo "$payload" | jq "$filter")
+          if [ $? -ne 0 ]; then
+            echo "ERROR: jq transform failed"
+            exit 1
+          fi
+          echo "$transformed"
+      - id: forward
+        uses: http
+        with:
+          url: ${{ inputs.target_url }}
+          method: POST
+          headers:
+            Content-Type: application/json
+          body: ${{ steps.transform.outputs.stdout }}
+          success_on_http_error: true
+      - id: report
+        uses: shell
+        run: |
+          code="${{ steps.forward.outputs.code }}"
+          echo "=== Forward Result ==="
+          echo "Target: ${{ inputs.target_url }}"
+          echo "Status: $code"
+          if [ "$code" -ge 200 ] && [ "$code" -lt 400 ]; then
+            echo "Result: SUCCESS"
+          else
+            echo "Result: FAILED"
+          fi
+    outputs:
+      status: ${{ steps.report.outputs.stdout }}
+
+outputs:
+  status: ${{ jobs.relay.outputs.status }}

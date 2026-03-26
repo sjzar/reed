@@ -1,0 +1,151 @@
+name: csv-insight
+
+description: >
+  Analyze a CSV file: shell extracts schema and statistics, agent identifies
+  patterns and anomalies with structured output, shell formats the report.
+
+inputs:
+  file:
+    type: string
+    required: true
+    description: "Path to the CSV file"
+
+agents:
+  data_analyst:
+    system_prompt: |
+      You are a data analyst. Given CSV schema, statistics, and sample rows,
+      identify patterns, anomalies, and actionable insights. Be specific —
+      reference column names and values. Focus on what's interesting or unusual.
+
+jobs:
+  extract:
+    steps:
+      - id: stats
+        uses: shell
+        run: |
+          file="${{ inputs.file }}"
+          if [ ! -f "$file" ]; then
+            echo "Error: file not found: $file" >&2
+            exit 1
+          fi
+
+          echo "=== File Info ==="
+          rows=$(wc -l < "$file" | tr -d ' ')
+          size=$(wc -c < "$file" | tr -d ' ')
+          echo "Rows: $rows (including header)"
+          echo "Size: $size bytes"
+          echo ""
+
+          echo "=== Header (columns) ==="
+          head -1 "$file"
+          echo ""
+
+          # Count columns
+          ncols=$(head -1 "$file" | awk -F',' '{print NF}')
+          echo "Columns: $ncols"
+          echo ""
+
+          echo "=== Sample Rows (first 10) ==="
+          head -11 "$file"
+          echo ""
+
+          echo "=== Sample Rows (last 5) ==="
+          tail -5 "$file"
+          echo ""
+
+          echo "=== Column Statistics ==="
+          # For each column, show unique count and sample values
+          header=$(head -1 "$file")
+          i=1
+          IFS=',' read -ra COLS <<< "$header"
+          for col in "${COLS[@]}"; do
+            col=$(echo "$col" | tr -d '"' | tr -d ' ')
+            uniq_count=$(tail -n +2 "$file" | awk -F',' -v c=$i '{print $c}' | sort -u | wc -l | tr -d ' ')
+            nulls=$(tail -n +2 "$file" | awk -F',' -v c=$i '{print $c}' | grep -cE '^[[:space:]]*$' || echo "0")
+            sample_vals=$(tail -n +2 "$file" | awk -F',' -v c=$i '{print $c}' | sort -u | head -5 | tr '\n' ', ' | sed 's/,$//')
+            echo "  $col: unique=$uniq_count nulls=$nulls samples=[$sample_vals]"
+            i=$((i + 1))
+          done
+    outputs:
+      data: ${{ steps.stats.outputs.stdout }}
+
+  analyze:
+    needs: [extract]
+    steps:
+      - id: insight
+        uses: agent
+        with:
+          agent: data_analyst
+          prompt: |
+            Analyze this CSV data:
+
+            ${{ jobs.extract.outputs.data }}
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              summary:
+                type: string
+                description: "Brief description of what this dataset contains"
+              key_findings:
+                type: array
+                items:
+                  type: string
+                description: "Notable patterns, trends, or insights"
+              anomalies:
+                type: array
+                items:
+                  type: string
+                description: "Data quality issues, outliers, or unexpected values"
+              data_quality:
+                type: string
+                enum: [good, fair, poor]
+                description: "Overall data quality assessment"
+              recommendations:
+                type: array
+                items:
+                  type: string
+                description: "Suggested next steps or analyses"
+            required: [summary, key_findings, anomalies, data_quality, recommendations]
+          max_iterations: 1
+    outputs:
+      result: ${{ steps.insight.outputs.output }}
+
+  report:
+    needs: [analyze]
+    steps:
+      - id: format
+        uses: shell
+        run: |
+          echo "======================================"
+          echo "  CSV Insight Report"
+          echo "  File: ${{ inputs.file }}"
+          echo "  Generated: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "======================================"
+          echo ""
+          result=$(cat <<'REED_EOF'
+          ${{ jobs.analyze.outputs.result }}
+          REED_EOF
+          )
+
+          echo "$result" | jq -r '
+            "Summary: \(.summary)",
+            "",
+            "Data Quality: \(.data_quality)",
+            "",
+            "Key Findings:",
+            (.key_findings[] | "  - \(.)"),
+            "",
+            if (.anomalies | length) > 0 then
+              "Anomalies:",
+              (.anomalies[] | "  ! \(.)"),
+              ""
+            else empty end,
+            "Recommendations:",
+            (.recommendations[] | "  → \(.)")
+          ' 2>/dev/null || echo "$result"
+    outputs:
+      report: ${{ steps.format.outputs.stdout }}
+
+outputs:
+  report: ${{ jobs.report.outputs.report }}

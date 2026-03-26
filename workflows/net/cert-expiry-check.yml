@@ -1,0 +1,85 @@
+name: cert-expiry-check
+
+description: >
+  Check TLS certificate expiration for a list of domains.
+
+inputs:
+  domains:
+    type: string
+    required: true
+    description: "Comma-separated list of domains to check"
+  warn_days:
+    type: integer
+    default: 30
+    description: "Warn if certificate expires within this many days"
+
+jobs:
+  check:
+    steps:
+      - id: certs
+        uses: shell
+        run: |
+          domains="${{ inputs.domains }}"
+          warn_days=${{ inputs.warn_days }}
+          echo "=== TLS Certificate Expiry Check ==="
+          echo "Warning threshold: ${warn_days} days"
+          echo ""
+
+          warnings=0
+          errors=0
+
+          IFS=',' read -ra ADDRS <<< "$domains"
+          for domain in "${ADDRS[@]}"; do
+            domain=$(echo "$domain" | tr -d ' ')
+            [ -z "$domain" ] && continue
+
+            # Extract port if specified
+            host="${domain%%:*}"
+            port="${domain##*:}"
+            [ "$port" = "$host" ] && port=443
+
+            # Use curl to extract certificate expiry date (more reliable than openssl s_client)
+            expiry=$(curl -svI --max-time 10 "https://${host}:${port}" 2>&1 \
+              | grep '^\*  expire date:' \
+              | sed 's/^\*  expire date: //')
+
+            if [ -z "$expiry" ]; then
+              echo "  ERROR  $domain — could not retrieve certificate"
+              errors=$((errors + 1))
+              continue
+            fi
+
+            # Calculate days remaining (macOS and Linux compatible)
+            if command -v gdate >/dev/null 2>&1; then
+              expiry_ts=$(gdate -d "$expiry" +%s 2>/dev/null)
+            elif date -d "$expiry" +%s >/dev/null 2>&1; then
+              expiry_ts=$(date -d "$expiry" +%s)
+            else
+              expiry_ts=$(python3 -c "
+          import email.utils, calendar
+          t = email.utils.parsedate('$expiry')
+          print(calendar.timegm(t))
+          " 2>/dev/null)
+            fi
+            now_ts=$(date +%s)
+            days_left=$(( (expiry_ts - now_ts) / 86400 ))
+
+            if [ "$days_left" -lt 0 ]; then
+              echo "  EXPIRED  $domain — expired $expiry ($((days_left * -1)) days ago)"
+              errors=$((errors + 1))
+            elif [ "$days_left" -lt "$warn_days" ]; then
+              echo "  WARNING  $domain — expires $expiry ($days_left days remaining)"
+              warnings=$((warnings + 1))
+            else
+              echo "  OK       $domain — expires $expiry ($days_left days remaining)"
+            fi
+          done
+
+          echo ""
+          echo "=== Summary ==="
+          echo "Checked: ${#ADDRS[@]} | Warnings: $warnings | Errors: $errors"
+    outputs:
+      report: ${{ steps.certs.outputs.stdout }}
+
+outputs:
+  report: ${{ jobs.check.outputs.report }}

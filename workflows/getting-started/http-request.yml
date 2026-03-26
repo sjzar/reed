@@ -1,0 +1,53 @@
+name: http-request
+
+description: >
+  Fetch data from a public API using the HTTP worker, then process the
+  response with a shell step. Demonstrates uses: http with URL, method,
+  headers, and output handling.
+
+inputs:
+  url:
+    type: string
+    default: "https://httpbin.org/get"
+    description: "URL to fetch (must return JSON)"
+
+jobs:
+  fetch:
+    steps:
+      - id: request
+        uses: http
+        with:
+          url: ${{ inputs.url }}
+          method: GET
+          headers:
+            Accept: application/json
+            User-Agent: reed-workflow/1.0
+    outputs:
+      body: ${{ steps.request.outputs.body }}
+      code: ${{ steps.request.outputs.code }}
+
+  process:
+    needs: [fetch]
+    steps:
+      - id: parse
+        uses: shell
+        run: |
+          echo "=== HTTP Response ==="
+          echo "Status: ${{ jobs.fetch.outputs.code }}"
+          echo ""
+
+          body='${{ jobs.fetch.outputs.body }}'
+          if echo "$body" | jq . >/dev/null 2>&1; then
+            echo "Response (formatted):"
+            echo "$body" | jq .
+            echo ""
+            echo "Keys found: $(echo "$body" | jq -r 'keys | join(", ")' 2>/dev/null || echo 'N/A')"
+          else
+            echo "Response (raw):"
+            echo "$body" | head -20
+          fi
+    outputs:
+      report: ${{ steps.parse.outputs.stdout }}
+
+outputs:
+  report: ${{ jobs.process.outputs.report }}

@@ -1,0 +1,86 @@
+name: dns-diagnose
+
+description: >
+  Resolve DNS records for domains and compare against expected values.
+
+inputs:
+  domains:
+    type: string
+    required: true
+    description: "Comma-separated list of domains to check"
+  record_types:
+    type: string
+    default: "A,AAAA,MX,NS,TXT,CNAME"
+    description: "Comma-separated DNS record types to query"
+
+jobs:
+  diagnose:
+    steps:
+      - id: resolve
+        uses: shell
+        run: |
+          domains="${{ inputs.domains }}"
+          record_types="${{ inputs.record_types }}"
+          echo "=== DNS Diagnosis ==="
+          echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo ""
+
+          resolver="dig"
+          if ! command -v dig >/dev/null 2>&1; then
+            if command -v nslookup >/dev/null 2>&1; then
+              resolver="nslookup"
+            else
+              echo "ERROR: neither dig nor nslookup found"
+              exit 1
+            fi
+          fi
+
+          IFS=',' read -ra DOMS <<< "$domains"
+          for domain in "${DOMS[@]}"; do
+            domain=$(echo "$domain" | tr -d ' ')
+            [ -z "$domain" ] && continue
+
+            echo "==============================="
+            echo "  Domain: $domain"
+            echo "==============================="
+
+            IFS=',' read -ra TYPES <<< "$record_types"
+            for rtype in "${TYPES[@]}"; do
+              rtype=$(echo "$rtype" | tr -d ' ' | tr '[:lower:]' '[:upper:]')
+              [ -z "$rtype" ] && continue
+
+              echo ""
+              echo "--- $rtype Records ---"
+              if [ "$resolver" = "dig" ]; then
+                result=$(dig +short "$domain" "$rtype" 2>/dev/null)
+                if [ -z "$result" ]; then
+                  echo "  (none)"
+                else
+                  echo "$result" | sed 's/^/  /'
+                fi
+              else
+                nslookup -type="$rtype" "$domain" 2>/dev/null | grep -v '^$' | tail -5 | sed 's/^/  /'
+              fi
+            done
+
+            echo ""
+            echo "--- Nameservers ---"
+            if [ "$resolver" = "dig" ]; then
+              dig +short NS "$domain" 2>/dev/null | sed 's/^/  /'
+            fi
+
+            echo ""
+            echo "--- Propagation Check (multiple resolvers) ---"
+            for ns in 8.8.8.8 1.1.1.1 9.9.9.9; do
+              if [ "$resolver" = "dig" ]; then
+                ip=$(dig +short "$domain" A "@$ns" 2>/dev/null | head -1)
+                echo "  $ns -> ${ip:-(no result)}"
+              fi
+            done
+            echo ""
+          done
+    outputs:
+      report: ${{ steps.resolve.outputs.stdout }}
+
+outputs:
+  report: ${{ jobs.diagnose.outputs.report }}

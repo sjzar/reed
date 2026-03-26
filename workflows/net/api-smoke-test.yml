@@ -1,0 +1,70 @@
+name: api-smoke-test
+
+description: >
+  Hit API endpoints, assert status and response body, emit pass/fail report.
+
+inputs:
+  config:
+    type: string
+    required: true
+    description: "Path to test config file (JSON array of {url, method, expected_status, expected_body_contains})"
+
+jobs:
+  test:
+    steps:
+      - id: run_tests
+        uses: shell
+        run: |
+          config="${{ inputs.config }}"
+          echo "=== API Smoke Test ==="
+          echo "Config: $config"
+          echo ""
+
+          pass=0
+          fail=0
+          total=0
+
+          # Parse JSON config with jq
+          count=$(jq length "$config")
+          for i in $(seq 0 $((count - 1))); do
+            url=$(jq -r ".[$i].url" "$config")
+            method=$(jq -r ".[$i].method // \"GET\"" "$config")
+            expected_status=$(jq -r ".[$i].expected_status // 200" "$config")
+            expected_body=$(jq -r ".[$i].expected_body_contains // \"\"" "$config")
+            total=$((total + 1))
+
+            # Make request
+            response=$(curl -s -w "\n%{http_code}" -X "$method" --max-time 30 "$url" 2>/dev/null)
+            status=$(echo "$response" | tail -1)
+            body=$(echo "$response" | sed '$d')
+
+            # Check status
+            status_ok=true
+            body_ok=true
+            if [ "$status" != "$expected_status" ]; then
+              status_ok=false
+            fi
+            if [ -n "$expected_body" ] && ! echo "$body" | grep -q "$expected_body"; then
+              body_ok=false
+            fi
+
+            if [ "$status_ok" = true ] && [ "$body_ok" = true ]; then
+              echo "  PASS  $method $url (HTTP $status)"
+              pass=$((pass + 1))
+            else
+              echo "  FAIL  $method $url"
+              [ "$status_ok" = false ] && echo "        Expected status $expected_status, got $status"
+              [ "$body_ok" = false ] && echo "        Expected body to contain: $expected_body"
+              fail=$((fail + 1))
+            fi
+          done
+
+          echo ""
+          echo "=== Results ==="
+          echo "Total: $total | Passed: $pass | Failed: $fail"
+          [ "$fail" -gt 0 ] && echo "STATUS: FAIL" || echo "STATUS: PASS"
+    outputs:
+      report: ${{ steps.run_tests.outputs.stdout }}
+
+outputs:
+  report: ${{ jobs.test.outputs.report }}

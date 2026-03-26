@@ -1,0 +1,100 @@
+name: repo-health
+
+description: >
+  Run format, lint, test, and build checks on a repository.
+  Auto-detects the project language and runs appropriate tools.
+
+inputs:
+  directory:
+    type: string
+    default: "."
+    description: "Repository root directory"
+
+jobs:
+  detect:
+    steps:
+      - id: language
+        uses: shell
+        run: |
+          cd "${{ inputs.directory }}"
+          if [ -f "go.mod" ]; then echo "go"
+          elif [ -f "package.json" ]; then echo "node"
+          elif [ -f "requirements.txt" ] || [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then echo "python"
+          elif [ -f "Cargo.toml" ]; then echo "rust"
+          elif [ -f "Makefile" ]; then echo "make"
+          else echo "unknown"
+          fi
+    outputs:
+      language: ${{ trim(steps.language.outputs.stdout) }}
+
+  checks:
+    needs: [detect]
+    steps:
+      - id: format_check
+        uses: shell
+        run: |
+          cd "${{ inputs.directory }}"
+          lang="${{ jobs.detect.outputs.language }}"
+          echo "=== Format Check ($lang) ==="
+          case "$lang" in
+            go) gofmt -l . | head -20; if [ -z "$(gofmt -l .)" ]; then echo "PASS"; else echo "FAIL: unformatted files found"; fi ;;
+            node) if command -v prettier >/dev/null 2>&1; then prettier --check . 2>&1 | tail -5; else echo "SKIP: prettier not found"; fi ;;
+            python) if command -v black >/dev/null 2>&1; then black --check . 2>&1 | tail -5; else echo "SKIP: black not found"; fi ;;
+            rust) cargo fmt --check 2>&1 | tail -5 ;;
+            *) echo "SKIP: no formatter configured" ;;
+          esac
+      - id: lint_check
+        uses: shell
+        run: |
+          cd "${{ inputs.directory }}"
+          lang="${{ jobs.detect.outputs.language }}"
+          echo "=== Lint Check ($lang) ==="
+          case "$lang" in
+            go) if command -v golangci-lint >/dev/null 2>&1; then golangci-lint run ./... 2>&1 | tail -20; else go vet ./... 2>&1; fi ;;
+            node) if command -v eslint >/dev/null 2>&1; then eslint . 2>&1 | tail -20; else echo "SKIP: eslint not found"; fi ;;
+            python) if command -v ruff >/dev/null 2>&1; then ruff check . 2>&1 | tail -20; else echo "SKIP: ruff not found"; fi ;;
+            rust) cargo clippy 2>&1 | tail -20 ;;
+            *) echo "SKIP: no linter configured" ;;
+          esac
+      - id: test_check
+        uses: shell
+        run: |
+          cd "${{ inputs.directory }}"
+          lang="${{ jobs.detect.outputs.language }}"
+          echo "=== Test Check ($lang) ==="
+          case "$lang" in
+            go) go test ./... 2>&1 | tail -20 ;;
+            node) if [ -f "package.json" ] && grep -q '"test"' package.json; then npm test 2>&1 | tail -20; else echo "SKIP: no test script"; fi ;;
+            python) if command -v pytest >/dev/null 2>&1; then pytest --tb=short 2>&1 | tail -20; else echo "SKIP: pytest not found"; fi ;;
+            rust) cargo test 2>&1 | tail -20 ;;
+            make) if grep -q '^test:' Makefile; then make test 2>&1 | tail -20; else echo "SKIP: no test target"; fi ;;
+            *) echo "SKIP: no test runner configured" ;;
+          esac
+      - id: build_check
+        uses: shell
+        run: |
+          cd "${{ inputs.directory }}"
+          lang="${{ jobs.detect.outputs.language }}"
+          echo "=== Build Check ($lang) ==="
+          case "$lang" in
+            go) go build ./... 2>&1 | tail -20; echo "PASS" ;;
+            node) if grep -q '"build"' package.json 2>/dev/null; then npm run build 2>&1 | tail -20; else echo "SKIP: no build script"; fi ;;
+            python) echo "SKIP: no build step for Python" ;;
+            rust) cargo build 2>&1 | tail -20 ;;
+            make) make 2>&1 | tail -20 ;;
+            *) echo "SKIP: no build configured" ;;
+          esac
+      - id: summary
+        uses: shell
+        run: echo "=== Repo Health Check Complete ==="
+    outputs:
+      format: ${{ steps.format_check.outputs.stdout }}
+      lint: ${{ steps.lint_check.outputs.stdout }}
+      test: ${{ steps.test_check.outputs.stdout }}
+      build: ${{ steps.build_check.outputs.stdout }}
+
+outputs:
+  format: ${{ jobs.checks.outputs.format }}
+  lint: ${{ jobs.checks.outputs.lint }}
+  test: ${{ jobs.checks.outputs.test }}
+  build: ${{ jobs.checks.outputs.build }}

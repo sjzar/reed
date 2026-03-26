@@ -1,0 +1,73 @@
+name: health-check
+
+description: >
+  Check system health: disk, memory, load, and optional URL availability.
+
+inputs:
+  urls:
+    type: string
+    default: ""
+    description: "Comma-separated URLs to check (optional)"
+
+jobs:
+  check:
+    steps:
+      - id: disk
+        uses: shell
+        run: |
+          echo "=== Disk Usage ==="
+          df -h / 2>/dev/null || df -h
+          echo ""
+          usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%')
+          if [ -n "$usage" ] && [ "$usage" -gt 90 ]; then
+            echo "WARNING: Disk usage above 90%"
+          fi
+      - id: memory
+        uses: shell
+        run: |
+          echo "=== Memory ==="
+          if command -v free >/dev/null 2>&1; then
+            free -h
+          elif command -v vm_stat >/dev/null 2>&1; then
+            vm_stat | head -10
+            echo ""
+            sysctl -n hw.memsize 2>/dev/null | awk '{printf "Total: %.2f GB\n", $1/1073741824}'
+          fi
+      - id: load
+        uses: shell
+        run: |
+          echo "=== System Load ==="
+          uptime
+          echo ""
+          cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "?")
+          echo "CPU cores: $cores"
+      - id: urls
+        uses: shell
+        run: |
+          urls="${{ inputs.urls }}"
+          if [ -z "$urls" ]; then
+            echo "=== URL Checks: (none configured) ==="
+            exit 0
+          fi
+          echo "=== URL Checks ==="
+          IFS=',' read -ra ADDR <<< "$urls"
+          for url in "${ADDR[@]}"; do
+            url=$(echo "$url" | tr -d ' ')
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" 2>/dev/null || echo "000")
+            if [ "$code" -ge 200 ] && [ "$code" -lt 400 ]; then
+              echo "  OK   ($code) $url"
+            else
+              echo "  FAIL ($code) $url"
+            fi
+          done
+    outputs:
+      disk: ${{ steps.disk.outputs.stdout }}
+      memory: ${{ steps.memory.outputs.stdout }}
+      load: ${{ steps.load.outputs.stdout }}
+      urls: ${{ steps.urls.outputs.stdout }}
+
+outputs:
+  disk: ${{ jobs.check.outputs.disk }}
+  memory: ${{ jobs.check.outputs.memory }}
+  load: ${{ jobs.check.outputs.load }}
+  urls: ${{ jobs.check.outputs.urls }}

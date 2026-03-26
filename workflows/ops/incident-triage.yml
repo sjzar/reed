@@ -1,0 +1,249 @@
+name: incident-triage
+
+description: >
+  Flagship workflow: schedule + parallel + agent + conditional.
+  Three parallel shell probes collect logs, metrics, and service status.
+  Agent triages with structured output. Alert fires only on high/critical.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+
+inputs:
+  log_path:
+    type: string
+    default: "/var/log/syslog"
+    description: "Path to log file or directory to monitor"
+  error_pattern:
+    type: string
+    default: "error|ERROR|fatal|FATAL|panic|OOM|segfault"
+    description: "Grep pattern for log errors"
+  services:
+    type: string
+    default: ""
+    description: "Comma-separated service names to check (empty = skip)"
+  alert_webhook:
+    type: string
+    default: ""
+    description: "Webhook URL for high/critical alerts (empty = log only)"
+
+agents:
+  triage_agent:
+    system_prompt: |
+      You are an incident triage specialist. Given recent logs, system metrics,
+      and service status, assess the overall health and identify any incidents.
+      Be precise — cite specific log lines, metrics, or services. Err on the
+      side of caution: flag potential issues early rather than missing them.
+
+jobs:
+  check_logs:
+    steps:
+      - id: scan
+        uses: shell
+        run: |
+          path="${{ inputs.log_path }}"
+          pattern="${{ inputs.error_pattern }}"
+
+          echo "=== Recent Log Errors (last 15 min) ==="
+
+          if [ ! -e "$path" ]; then
+            echo "(log path not found: $path — skipping)"
+            exit 0
+          fi
+
+          # Get recent errors (last 15 minutes worth, max 50 lines)
+          if [ -d "$path" ]; then
+            find "$path" -type f -name '*.log' -mmin -15 -exec grep -hE "$pattern" {} + 2>/dev/null | tail -50
+          else
+            grep -E "$pattern" "$path" 2>/dev/null | tail -50
+          fi
+
+          count=0
+          if [ -d "$path" ]; then
+            count=$(find "$path" -type f -name '*.log' -mmin -15 -exec grep -chE "$pattern" {} + 2>/dev/null | awk '{s+=$1} END {print s+0}')
+          else
+            count=$(grep -cE "$pattern" "$path" 2>/dev/null || echo "0")
+          fi
+          echo ""
+          echo "Total matching lines: $count"
+    outputs:
+      result: ${{ steps.scan.outputs.stdout }}
+
+  check_metrics:
+    steps:
+      - id: collect
+        uses: shell
+        run: |
+          echo "=== System Metrics ==="
+
+          echo "--- CPU ---"
+          if command -v top >/dev/null 2>&1; then
+            # macOS vs Linux top
+            if [ "$(uname)" = "Darwin" ]; then
+              top -l 1 -n 0 2>/dev/null | grep -E "CPU|PhysMem|Processes" || echo "(top unavailable)"
+            else
+              top -bn1 2>/dev/null | head -5 || echo "(top unavailable)"
+            fi
+          fi
+          echo ""
+
+          echo "--- Memory ---"
+          if command -v free >/dev/null 2>&1; then
+            free -h
+          elif command -v vm_stat >/dev/null 2>&1; then
+            vm_stat | head -10
+          fi
+          echo ""
+
+          echo "--- Disk ---"
+          df -h / 2>/dev/null | awk 'NR<=2'
+          echo ""
+
+          echo "--- Load Average ---"
+          uptime
+    outputs:
+      result: ${{ steps.collect.outputs.stdout }}
+
+  check_services:
+    steps:
+      - id: probe
+        uses: shell
+        run: |
+          services="${{ inputs.services }}"
+
+          echo "=== Service Status ==="
+
+          if [ -z "$services" ]; then
+            echo "(no services configured — skipping)"
+            exit 0
+          fi
+
+          IFS=',' read -ra SVCS <<< "$services"
+          for svc in "${SVCS[@]}"; do
+            svc=$(echo "$svc" | tr -d ' ')
+            [ -z "$svc" ] && continue
+
+            status="unknown"
+            if command -v systemctl >/dev/null 2>&1; then
+              if systemctl is-active --quiet "$svc" 2>/dev/null; then
+                status="running"
+              else
+                status="stopped"
+              fi
+            elif command -v launchctl >/dev/null 2>&1; then
+              if launchctl list 2>/dev/null | grep -q "$svc"; then
+                status="running"
+              else
+                status="not_found"
+              fi
+            fi
+
+            echo "  $svc: $status"
+          done
+    outputs:
+      result: ${{ steps.probe.outputs.stdout }}
+
+  triage:
+    needs: [check_logs, check_metrics, check_services]
+    steps:
+      - id: ts
+        uses: shell
+        run: date -u '+%Y-%m-%dT%H:%M:%SZ'
+      - id: assess
+        uses: agent
+        with:
+          agent: triage_agent
+          prompt: |
+            Triage the current system state:
+
+            ${{ jobs.check_logs.outputs.result }}
+
+            ${{ jobs.check_metrics.outputs.result }}
+
+            ${{ jobs.check_services.outputs.result }}
+
+            Timestamp: ${{ steps.ts.outputs.stdout }}
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              severity:
+                type: string
+                enum: [ok, low, medium, high, critical]
+                description: "Overall incident severity"
+              summary:
+                type: string
+                description: "One-sentence assessment"
+              root_cause:
+                type: string
+                description: "Most likely root cause (or 'none' if healthy)"
+              affected_services:
+                type: array
+                items:
+                  type: string
+                description: "List of affected services or components"
+              remediation:
+                type: string
+                description: "Recommended immediate action"
+            required: [severity, summary, root_cause, affected_services, remediation]
+          max_iterations: 1
+    outputs:
+      result: ${{ steps.assess.outputs.output }}
+
+  alert:
+    needs: [triage]
+    steps:
+      - id: notify
+        uses: shell
+        if: ${{ jobs.triage.outputs.result contains '"high"' || jobs.triage.outputs.result contains '"critical"' }}
+        run: |
+          webhook="${{ inputs.alert_webhook }}"
+          result=$(cat <<'REED_EOF'
+          ${{ jobs.triage.outputs.result }}
+          REED_EOF
+          )
+
+          echo "=== INCIDENT ALERT ==="
+          echo "$result" | jq -r '
+            "Severity: \(.severity)",
+            "Summary:  \(.summary)",
+            "Cause:    \(.root_cause)",
+            "Services: \(.affected_services | join(", "))",
+            "Action:   \(.remediation)"
+          ' 2>/dev/null || echo "$result"
+
+          if [ -n "$webhook" ]; then
+            echo ""
+            echo "Sending alert to webhook..."
+          else
+            echo ""
+            echo "(No webhook configured — alert logged only)"
+          fi
+
+      - id: send_webhook
+        uses: http
+        if: ${{ jobs.triage.outputs.result contains '"high"' || jobs.triage.outputs.result contains '"critical"' && inputs.alert_webhook != '' }}
+        with:
+          url: ${{ inputs.alert_webhook }}
+          method: POST
+          headers:
+            Content-Type: application/json
+          body: ${{ jobs.triage.outputs.result }}
+          success_on_http_error: true
+
+      - id: all_clear
+        uses: shell
+        if: ${{ !(jobs.triage.outputs.result contains '"high"') && !(jobs.triage.outputs.result contains '"critical"') }}
+        run: |
+          result=$(cat <<'REED_EOF'
+          ${{ jobs.triage.outputs.result }}
+          REED_EOF
+          )
+          severity=$(echo "$result" | jq -r '.severity' 2>/dev/null || echo "unknown")
+          summary=$(echo "$result" | jq -r '.summary' 2>/dev/null || echo "$result")
+          echo "[$severity] $summary — no alert needed."
+    outputs:
+      status: ${{ steps.notify.outputs.stdout }}
+
+outputs:
+  triage: ${{ jobs.triage.outputs.result }}

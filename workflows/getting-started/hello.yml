@@ -1,0 +1,27 @@
+name: hello
+
+description: >
+  Echo a greeting and current date — the simplest possible Reed workflow.
+
+inputs:
+  name:
+    type: string
+    default: "World"
+    description: "Name to greet"
+
+jobs:
+  greet:
+    steps:
+      - id: say_hello
+        uses: shell
+        run: echo "Hello, ${{ inputs.name }}!"
+      - id: show_date
+        uses: shell
+        run: date "+%Y-%m-%d %H:%M:%S"
+    outputs:
+      greeting: ${{ steps.say_hello.outputs.stdout }}
+      date: ${{ steps.show_date.outputs.stdout }}
+
+outputs:
+  greeting: ${{ jobs.greet.outputs.greeting }}
+  date: ${{ jobs.greet.outputs.date }}

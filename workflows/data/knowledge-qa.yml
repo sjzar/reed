@@ -1,0 +1,219 @@
+name: knowledge-qa
+
+description: >
+  Use a local folder as a knowledge base and answer questions about its contents.
+  Shell indexes the directory and collects relevant file content, then the agent
+  answers the question grounded in the actual data. Demonstrates the
+  "collect → decide" pattern applied to document Q&A.
+
+# --- Usage ---
+# reed run workflows/data/knowledge-qa.yml -i directory=./docs -i question="How does the engine schedule jobs?"
+# reed run workflows/data/knowledge-qa.yml -i directory=~/notes -i question="What are the key decisions from last week?"
+# reed run workflows/data/knowledge-qa.yml -i directory=./src -i question="Where is authentication implemented?"
+
+inputs:
+  directory:
+    type: string
+    required: true
+    description: "Path to the knowledge base directory"
+  question:
+    type: string
+    required: true
+    description: "Question to answer from the knowledge base"
+  extensions:
+    type: string
+    default: "md,txt,go,py,js,ts,yaml,yml,json,toml,sh,rs,java,rb,c,h,css,html"
+    description: "Comma-separated file extensions to include"
+  max_files:
+    type: integer
+    default: 50
+    description: "Maximum number of files to index"
+  preview_lines:
+    type: integer
+    default: 80
+    description: "Lines to read per file for content preview"
+
+agents:
+  answerer:
+    system_prompt: |
+      You are a knowledge base assistant. You answer questions based strictly on
+      the provided file contents. Rules:
+      1. Only use information present in the provided documents.
+      2. Cite the source file when referencing specific information.
+      3. If the answer is not in the provided content, say so clearly.
+      4. Be concise and direct.
+
+jobs:
+  # Step 1: Index the directory — build a file manifest
+  index:
+    steps:
+      - id: manifest
+        uses: shell
+        run: |
+          dir="${{ inputs.directory }}"
+          extensions="${{ inputs.extensions }}"
+          max_files="${{ inputs.max_files }}"
+
+          if [ ! -d "$dir" ]; then
+            echo "Error: directory not found: $dir" >&2
+            exit 1
+          fi
+
+          echo "=== Knowledge Base: $dir ==="
+          echo ""
+
+          # Build find pattern from extensions
+          find_args=""
+          IFS=',' read -ra exts <<< "$extensions"
+          for i in "${!exts[@]}"; do
+            ext=$(echo "${exts[$i]}" | tr -d ' ')
+            if [ "$i" -eq 0 ]; then
+              find_args="-name \"*.$ext\""
+            else
+              find_args="$find_args -o -name \"*.$ext\""
+            fi
+          done
+
+          # Find files sorted by modification time (newest first)
+          files=$(eval "find \"$dir\" -type f \\( $find_args \\) -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/vendor/*' -not -path '*/__pycache__/*'" 2>/dev/null | head -"$max_files")
+
+          file_count=$(echo "$files" | grep -c '.' || echo "0")
+          echo "Files indexed: $file_count"
+          echo ""
+
+          echo "=== File List ==="
+          echo "$files" | while read -r f; do
+            [ -z "$f" ] && continue
+            size=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
+            lines=$(wc -l < "$f" 2>/dev/null | tr -d ' ')
+            echo "  $f ($lines lines, $size bytes)"
+          done
+          echo ""
+
+          echo "$files"
+    outputs:
+      manifest: ${{ steps.manifest.outputs.stdout }}
+
+  # Step 2: Collect relevant content from indexed files
+  collect:
+    needs: [index]
+    steps:
+      - id: content
+        uses: shell
+        run: |
+          dir="${{ inputs.directory }}"
+          question="${{ inputs.question }}"
+          extensions="${{ inputs.extensions }}"
+          max_files="${{ inputs.max_files }}"
+          preview_lines="${{ inputs.preview_lines }}"
+
+          echo "=== Question ==="
+          echo "$question"
+          echo ""
+          echo "=== Document Contents ==="
+
+          # Rebuild file list (same logic as index)
+          find_args=""
+          IFS=',' read -ra exts <<< "$extensions"
+          for i in "${!exts[@]}"; do
+            ext=$(echo "${exts[$i]}" | tr -d ' ')
+            if [ "$i" -eq 0 ]; then
+              find_args="-name \"*.$ext\""
+            else
+              find_args="$find_args -o -name \"*.$ext\""
+            fi
+          done
+
+          files=$(eval "find \"$dir\" -type f \\( $find_args \\) -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/vendor/*' -not -path '*/__pycache__/*'" 2>/dev/null | head -"$max_files")
+
+          echo "$files" | while read -r f; do
+            [ -z "$f" ] && continue
+            echo ""
+            echo "--- $f ---"
+            head -"$preview_lines" "$f" 2>/dev/null
+            total=$(wc -l < "$f" 2>/dev/null | tr -d ' ')
+            if [ "$total" -gt "$preview_lines" ]; then
+              echo "... (truncated, $total total lines)"
+            fi
+          done
+    outputs:
+      context: ${{ steps.content.outputs.stdout }}
+
+  # Step 3: Agent answers the question grounded in collected content
+  answer:
+    needs: [collect]
+    steps:
+      - id: qa
+        uses: agent
+        with:
+          agent: answerer
+          prompt: |
+            Based on the following knowledge base contents, answer the question.
+
+            ${{ jobs.collect.outputs.context }}
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              answer:
+                type: string
+                description: "Direct answer to the question"
+              sources:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    file:
+                      type: string
+                      description: "File path that supports this part of the answer"
+                    relevance:
+                      type: string
+                      description: "Brief note on what this file contributes"
+                  required: [file, relevance]
+                description: "Files that were used to answer the question"
+              confidence:
+                type: string
+                enum: [high, medium, low]
+                description: "How well the knowledge base covers this question"
+            required: [answer, sources, confidence]
+          max_iterations: 1
+    outputs:
+      result: ${{ steps.qa.outputs.output }}
+
+  # Step 4: Format the answer
+  report:
+    needs: [index, answer]
+    steps:
+      - id: format
+        uses: shell
+        run: |
+          echo "======================================"
+          echo "  Knowledge Base Q&A"
+          echo "  $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "======================================"
+          echo ""
+          echo "Directory: ${{ inputs.directory }}"
+          echo "Question:  ${{ inputs.question }}"
+          echo ""
+
+          result=$(cat <<'REED_EOF'
+          ${{ jobs.answer.outputs.result }}
+          REED_EOF
+          )
+
+          echo "$result" | jq -r '
+            "Confidence: \(.confidence)",
+            "",
+            "Answer:",
+            .answer,
+            "",
+            "Sources:",
+            (.sources[] | "  - \(.file): \(.relevance)")
+          ' 2>/dev/null || echo "$result"
+    outputs:
+      report: ${{ steps.format.outputs.stdout }}
+
+outputs:
+  report: ${{ jobs.report.outputs.report }}
+  result: ${{ jobs.answer.outputs.result }}

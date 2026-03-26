@@ -1,0 +1,512 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reed.dev/workflow-schema.json",
+  "title": "Reed Workflow",
+  "description": "Reed workflow definition file (.yml/.yaml). Defines a local-first, daemonless workflow with triggers, jobs, steps, agents, skills, and MCP servers. Note: the parser silently ignores unknown fields (no strict-mode rejection), so this schema does not set additionalProperties: false.",
+  "type": "object",
+  "required": ["jobs"],
+  "properties": {
+    "app": {
+      "type": "string",
+      "description": "Application name."
+    },
+    "name": {
+      "type": "string",
+      "description": "Workflow name."
+    },
+    "version": {
+      "type": "string",
+      "description": "Version string."
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of the workflow."
+    },
+    "on": {
+      "$ref": "#/$defs/OnSpec"
+    },
+    "tool_access": {
+      "type": "string",
+      "enum": ["workdir", "full"],
+      "default": "workdir",
+      "description": "Tool filesystem access scope. \"workdir\" restricts tools to the working directory; \"full\" allows unrestricted access."
+    },
+    "run_jobs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Default DAG entrypoint filter. Each item must reference an existing job ID."
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/InputSpec" },
+      "description": "Input parameter definitions. Note: type validation is only enforced for trigger-scoped inputs (on.service.http, on.service.mcp, on.cli.commands), not for workflow-level inputs."
+    },
+    "outputs": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Output expressions. The validator rejects expressions that contain both \"jobs.\" and \".steps\" (cross-job step piercing), but does not catch bare \"steps.\" references at workflow scope."
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Environment variables available to all jobs and steps."
+    },
+    "agents": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/AgentSpec" },
+      "description": "Agent role definitions. Each key is a unique agent ID referenced by steps via with.agent."
+    },
+    "skills": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/SkillSpec" },
+      "description": "Skill definitions. Referenced by agent specs via their skills array."
+    },
+    "mcp_servers": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/MCPServerSpec" },
+      "description": "MCP server connections (Reed as client). Each key is a unique server ID."
+    },
+    "jobs": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/Job" },
+      "description": "Job DAG. Must contain at least one job. Each key becomes the job ID."
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Opaque metadata. Passed through without validation."
+    }
+  },
+  "$defs": {
+    "OnSpec": {
+      "type": "object",
+      "description": "Trigger configuration. If omitted or empty (on: {}), defaults to implicit CLI trigger (on: { cli: {} }). cli and service are mutually exclusive. cli and schedule are mutually exclusive. service and schedule can coexist.",
+      "properties": {
+        "cli": { "$ref": "#/$defs/CLITrigger" },
+        "service": { "$ref": "#/$defs/ServiceTrigger" },
+        "schedule": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ScheduleRule" },
+          "description": "Cron-based schedule triggers."
+        }
+      },
+      "allOf": [
+        {
+          "not": {
+            "required": ["cli", "service"]
+          }
+        },
+        {
+          "not": {
+            "required": ["cli", "schedule"]
+          }
+        }
+      ]
+    },
+    "CLITrigger": {
+      "type": "object",
+      "description": "Ephemeral batch mode execution with optional subcommands.",
+      "properties": {
+        "commands": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/CLICommand" },
+          "description": "Named subcommands. Each key is the command name."
+        }
+      }
+    },
+    "CLICommand": {
+      "type": "object",
+      "description": "Named subcommand within a CLI trigger.",
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of the command."
+        },
+        "run_jobs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Job IDs to run for this command. Must reference existing jobs."
+        },
+        "inputs": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/InputSpec" },
+          "description": "Input overrides for this command."
+        },
+        "outputs": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Output overrides for this command."
+        }
+      }
+    },
+    "ServiceTrigger": {
+      "type": "object",
+      "required": ["port"],
+      "description": "Daemon mode execution with HTTP and/or MCP routes. If both http and mcp are empty, a default POST / route is auto-injected.",
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Listen port. Required and must be > 0."
+        },
+        "http": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/HTTPRoute" },
+          "description": "HTTP route triggers."
+        },
+        "mcp": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/MCPTool" },
+          "description": "MCP tool triggers."
+        }
+      }
+    },
+    "HTTPRoute": {
+      "type": "object",
+      "required": ["path", "method"],
+      "description": "HTTP trigger within a service workflow.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "URL path (e.g., \"/webhook\")."
+        },
+        "method": {
+          "type": "string",
+          "description": "HTTP method. Validated against: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS. The validator uppercases before checking, so lowercase values like \"post\" are accepted."
+        },
+        "async": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, the request returns immediately and the workflow runs asynchronously."
+        },
+        "run_jobs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Job IDs to run. Must reference existing jobs."
+        },
+        "inputs": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/InputSpec" },
+          "description": "Input definitions for this route."
+        },
+        "outputs": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Output expressions for this route."
+        },
+        "concurrency": { "$ref": "#/$defs/ConcurrencySpec" }
+      }
+    },
+    "ConcurrencySpec": {
+      "type": "object",
+      "required": ["group"],
+      "description": "Defines how concurrent runs of the same route should be handled.",
+      "properties": {
+        "group": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Concurrency partition key. Typically an expression like \"${{ inputs.session_id }}\". Must not be empty or whitespace-only."
+        },
+        "behavior": {
+          "type": "string",
+          "enum": ["queue", "skip", "replace-pending"],
+          "default": "queue",
+          "description": "How a new request is handled when the same group is busy. \"queue\" = strict FIFO (default). \"skip\" = reject the new request. \"replace-pending\" = keep running request, retain only newest pending."
+        }
+      }
+    },
+    "MCPTool": {
+      "type": "object",
+      "required": ["name"],
+      "description": "MCP tool trigger within a service workflow.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Tool name. Must not be empty."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of the tool."
+        },
+        "run_jobs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Job IDs to run. Must reference existing jobs."
+        },
+        "inputs": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/InputSpec" },
+          "description": "Input definitions."
+        },
+        "outputs": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Output expressions."
+        }
+      }
+    },
+    "ScheduleRule": {
+      "type": "object",
+      "required": ["cron"],
+      "description": "Cron-based trigger rule.",
+      "properties": {
+        "cron": {
+          "type": "string",
+          "minLength": 1,
+          "description": "5-field cron expression: minute hour day-of-month month day-of-week. Example: \"0 9 * * *\" (daily at 9am)."
+        },
+        "run_jobs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Job IDs to run. Must reference existing jobs."
+        }
+      }
+    },
+    "InputSpec": {
+      "type": "object",
+      "description": "Input parameter definition.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["string", "number", "boolean", "integer", "media", "[]media"],
+          "description": "Input value type. Note: type validation is only enforced for trigger-scoped inputs, not workflow-level inputs."
+        },
+        "required": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether this input must be provided."
+        },
+        "default": {
+          "description": "Default value if the input is not provided. Type should match the declared type."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of the input."
+        }
+      }
+    },
+    "AgentSpec": {
+      "type": "object",
+      "description": "Agent role definition with model, system prompt, skills, and control parameters.",
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "LLM model identifier. Can be an expression like \"${{ env.REED_DEFAULT_MODEL ?? 'gpt-5.4' }}\"."
+        },
+        "system_prompt": {
+          "type": "string",
+          "description": "System prompt for the agent. Supports multi-line YAML strings."
+        },
+        "skills": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "List of skill IDs to mount for this agent. Each must reference a defined skill."
+        },
+        "max_iterations": {
+          "type": "integer",
+          "default": 0,
+          "description": "Maximum conversation iterations. 0 = use system default."
+        },
+        "temperature": {
+          "type": "number",
+          "description": "LLM temperature parameter. Omit to use model default."
+        },
+        "thinking_level": {
+          "type": "string",
+          "description": "Extended thinking level. Omit to use model default."
+        }
+      }
+    },
+    "SkillSpec": {
+      "type": "object",
+      "description": "Skill definition. Exactly one of \"uses\" or \"resources\" must be provided.",
+      "properties": {
+        "uses": {
+          "type": "string",
+          "description": "Skill catalog reference. Mutually exclusive with resources."
+        },
+        "resources": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SkillResourceSpec" },
+          "minItems": 1,
+          "description": "Inline skill resources. Mutually exclusive with uses. Must include exactly one root-level SKILL.md. Paths must be relative, no traversal (..), no duplicates, no nested SKILL.md."
+        }
+      },
+      "oneOf": [
+        {
+          "required": ["uses"],
+          "properties": {
+            "resources": { "not": {} }
+          }
+        },
+        {
+          "required": ["resources"],
+          "properties": {
+            "uses": { "not": {} }
+          }
+        }
+      ]
+    },
+    "SkillResourceSpec": {
+      "type": "object",
+      "required": ["path", "content"],
+      "description": "Inline skill resource file. Path must be relative (no absolute paths, no .. traversal). The resource set must include exactly one root-level SKILL.md.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Relative file path. Must not be absolute or contain traversal. Nested SKILL.md (e.g., \"subdir/SKILL.md\") is rejected."
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Resource file content. For SKILL.md: YAML frontmatter (name, description, allowed_tools) + markdown body."
+        }
+      }
+    },
+    "MCPServerSpec": {
+      "type": "object",
+      "required": ["transport"],
+      "description": "MCP server connection configuration (Reed as client).",
+      "properties": {
+        "transport": {
+          "type": "string",
+          "enum": ["stdio", "sse", "streamable-http"],
+          "description": "Transport type."
+        },
+        "command": {
+          "type": "string",
+          "description": "Command to execute. Required when transport is \"stdio\"."
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Arguments for the command."
+        },
+        "url": {
+          "type": "string",
+          "description": "Server URL. Required when transport is \"sse\" or \"streamable-http\". The validator only checks for non-empty string (no URI format enforcement)."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Environment variables for the server process."
+        },
+        "header": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "HTTP headers (for HTTP-based transports)."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "transport": { "const": "stdio" } },
+            "required": ["transport"]
+          },
+          "then": {
+            "required": ["command"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "transport": { "const": "sse" } },
+            "required": ["transport"]
+          },
+          "then": {
+            "required": ["url"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "transport": { "const": "streamable-http" } },
+            "required": ["transport"]
+          },
+          "then": {
+            "required": ["url"]
+          }
+        }
+      ]
+    },
+    "Job": {
+      "type": "object",
+      "required": ["steps"],
+      "description": "Unit of work within the workflow DAG. The job ID is set from the map key.",
+      "properties": {
+        "needs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Job IDs that must complete before this job starts. No cycles or self-references allowed."
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/Step" },
+          "description": "Ordered list of steps to execute. Must contain at least one step."
+        },
+        "outputs": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Output expressions. Can reference ${{ steps.<id>.outputs.<key> }}."
+        }
+      }
+    },
+    "Step": {
+      "type": "object",
+      "description": "Single executable action within a job.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Step identifier. Auto-generated as step_0, step_1, etc. if omitted. Note: postProcess auto-fills IDs before validation, so the background+id rule is effectively a dead check in the normal load path."
+        },
+        "uses": {
+          "type": "string",
+          "description": "Worker type. Registered workers: \"shell\", \"bash\", \"run\" (all route to ShellWorker), \"agent\" (AgentWorker), \"http\" (HTTPWorker). Remote URLs, fragment (#) and registry (@) references are rejected by the validator."
+        },
+        "run": {
+          "type": "string",
+          "description": "Shell command (DSL sugar). Promoted to with.run during postProcess. Note: this does NOT auto-set uses; you must set uses to \"shell\", \"bash\", or \"run\" explicitly, otherwise the router will fail with \"unknown uses\"."
+        },
+        "with": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Worker parameters. Contents depend on the worker type. For shell: { run: \"...\" }. For agent: { agent: \"<agent_id>\", prompt: \"...\" }. The validator only checks that with.agent references a defined agent if present; with.prompt is not validated at compile time."
+        },
+        "if": {
+          "type": "string",
+          "description": "Conditional expression. Step is skipped if the expression evaluates to false. Uses ${{ ... }} syntax."
+        },
+        "timeout": {
+          "type": "integer",
+          "default": 0,
+          "description": "Timeout in seconds. 0 = use system default."
+        },
+        "workdir": {
+          "type": "string",
+          "description": "Working directory override for this step."
+        },
+        "shell": {
+          "type": "string",
+          "enum": ["bash", "sh", "zsh", "powershell", "cmd"],
+          "description": "Shell identifier. Only valid when uses is \"shell\", \"bash\", \"run\", or empty. uses: bash does not allow shell override (must be \"bash\" or omitted)."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Step-level environment variables."
+        },
+        "background": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run step in background. The validator requires an explicit id when background is true, though postProcess auto-fills IDs before validation in the normal load path."
+        }
+      }
+    }
+  }
+}

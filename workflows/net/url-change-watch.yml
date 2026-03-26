@@ -1,0 +1,70 @@
+name: url-change-watch
+
+description: >
+  Fetch a URL and diff against the last snapshot. Detects content changes.
+
+inputs:
+  url:
+    type: string
+    required: true
+    description: "URL to monitor for changes"
+  snapshot_dir:
+    type: string
+    default: ".reed-snapshots"
+    description: "Directory to store snapshots"
+
+jobs:
+  watch:
+    steps:
+      - id: fetch_and_diff
+        uses: shell
+        run: |
+          url="${{ inputs.url }}"
+          snap_dir="${{ inputs.snapshot_dir }}"
+          mkdir -p "$snap_dir"
+
+          # Create a safe filename from the URL
+          safe_name=$(echo "$url" | sed 's/[^a-zA-Z0-9]/_/g' | head -c 200)
+          current_file="${snap_dir}/${safe_name}.current"
+          previous_file="${snap_dir}/${safe_name}.previous"
+
+          echo "=== URL Change Watch ==="
+          echo "URL: $url"
+          echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo ""
+
+          # Fetch current content
+          if ! curl -sL --max-time 30 "$url" > "${current_file}.tmp" 2>/dev/null; then
+            echo "ERROR: Failed to fetch URL"
+            exit 1
+          fi
+
+          # Strip volatile content (timestamps, random IDs) for cleaner diffs
+          # Just use the raw content for now
+          mv "${current_file}.tmp" "$current_file"
+
+          if [ ! -f "$previous_file" ]; then
+            echo "STATUS: FIRST_RUN"
+            echo "Snapshot saved. No previous version to compare."
+            cp "$current_file" "$previous_file"
+            exit 0
+          fi
+
+          # Compare
+          if diff -q "$previous_file" "$current_file" >/dev/null 2>&1; then
+            echo "STATUS: NO_CHANGE"
+            echo "Content is identical to last snapshot."
+          else
+            echo "STATUS: CHANGED"
+            echo ""
+            echo "=== Diff ==="
+            diff -u "$previous_file" "$current_file" | head -100
+          fi
+
+          # Rotate snapshot
+          cp "$current_file" "$previous_file"
+    outputs:
+      report: ${{ steps.fetch_and_diff.outputs.stdout }}
+
+outputs:
+  report: ${{ jobs.watch.outputs.report }}

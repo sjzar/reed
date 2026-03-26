@@ -1,0 +1,70 @@
+name: conditional
+
+description: >
+  Steps that run or skip based on if: expressions. Input-driven branching
+  demonstrates conditional execution — lint always runs, tests only in
+  staging/prod, deploy-check only in prod.
+
+inputs:
+  environment:
+    type: string
+    default: "dev"
+    description: "Target environment: dev, staging, or prod"
+
+jobs:
+  pipeline:
+    steps:
+      - id: show_env
+        uses: shell
+        run: |
+          echo "Environment: ${{ inputs.environment }}"
+          echo "---"
+
+      - id: lint
+        uses: shell
+        run: |
+          echo "=== Lint (always runs) ==="
+          echo "Checking code style..."
+          echo "Result: PASS"
+
+      - id: test
+        uses: shell
+        if: ${{ inputs.environment == 'staging' || inputs.environment == 'prod' }}
+        run: |
+          echo "=== Tests (staging/prod only) ==="
+          echo "Running test suite..."
+          echo "Tests passed: 42/42"
+          echo "Result: PASS"
+
+      - id: deploy_check
+        uses: shell
+        if: ${{ inputs.environment == 'prod' }}
+        run: |
+          echo "=== Deploy Check (prod only) ==="
+          echo "Verifying deployment prerequisites..."
+          echo "  Docker: $(docker --version 2>/dev/null || echo 'not installed')"
+          echo "  Git status: $(git status --porcelain 2>/dev/null | wc -l | tr -d ' ') uncommitted files"
+          echo "Result: REVIEWED"
+
+      - id: report
+        uses: shell
+        run: |
+          env="${{ inputs.environment }}"
+          echo "=== Pipeline Summary ==="
+          echo "Environment: $env"
+          echo "Lint: ran"
+          if [ "$env" = "staging" ] || [ "$env" = "prod" ]; then
+            echo "Tests: ran"
+          else
+            echo "Tests: skipped (dev)"
+          fi
+          if [ "$env" = "prod" ]; then
+            echo "Deploy check: ran"
+          else
+            echo "Deploy check: skipped (not prod)"
+          fi
+    outputs:
+      summary: ${{ steps.report.outputs.stdout }}
+
+outputs:
+  summary: ${{ jobs.pipeline.outputs.summary }}

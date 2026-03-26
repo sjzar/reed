@@ -1,0 +1,190 @@
+name: code-review
+
+description: >
+  Parallel DAG code review: lint, diff, and structure analysis run concurrently,
+  then an agent synthesizes findings with structured output.
+
+inputs:
+  directory:
+    type: string
+    default: "."
+    description: "Directory to review"
+  base:
+    type: string
+    default: "main"
+    description: "Base branch to diff against"
+
+agents:
+  reviewer:
+    system_prompt: |
+      You are a senior code reviewer. Given lint results, a git diff, and
+      project structure, produce a structured review. Focus on real issues —
+      bugs, security, performance, and maintainability. Skip stylistic nitpicks
+      unless they indicate deeper problems.
+
+jobs:
+  lint:
+    steps:
+      - id: run
+        uses: shell
+        run: |
+          dir="${{ inputs.directory }}"
+          cd "$dir"
+
+          echo "=== Lint Results ==="
+
+          # Auto-detect language and run appropriate linter
+          if [ -f "go.mod" ]; then
+            echo "Language: Go"
+            go vet ./... 2>&1 || true
+            echo "---"
+            if command -v golangci-lint >/dev/null 2>&1; then
+              golangci-lint run --timeout 60s 2>&1 | tail -50 || true
+            fi
+          elif [ -f "package.json" ]; then
+            echo "Language: JavaScript/TypeScript"
+            if [ -f "node_modules/.bin/eslint" ]; then
+              npx eslint . --max-warnings 50 2>&1 | tail -50 || true
+            else
+              echo "(eslint not installed — skipping)"
+            fi
+          elif [ -f "requirements.txt" ] || [ -f "pyproject.toml" ]; then
+            echo "Language: Python"
+            if command -v ruff >/dev/null 2>&1; then
+              ruff check . 2>&1 | tail -50 || true
+            elif command -v flake8 >/dev/null 2>&1; then
+              flake8 . --max-line-length=120 2>&1 | tail -50 || true
+            else
+              echo "(no Python linter found — skipping)"
+            fi
+          else
+            echo "(no recognized project type — skipping lint)"
+          fi
+    outputs:
+      result: ${{ steps.run.outputs.stdout }}
+
+  diff:
+    steps:
+      - id: run
+        uses: shell
+        run: |
+          dir="${{ inputs.directory }}"
+          base="${{ inputs.base }}"
+          cd "$dir"
+
+          echo "=== Git Diff vs $base ==="
+
+          if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            echo "(not a git repo — skipping diff)"
+            exit 0
+          fi
+
+          # Show changed files summary
+          echo "--- Changed files ---"
+          git diff --stat "$base"...HEAD 2>/dev/null || git diff --stat HEAD 2>/dev/null || echo "(no diff available)"
+          echo ""
+
+          # Show actual diff (limited)
+          echo "--- Diff content (truncated to 300 lines) ---"
+          git diff "$base"...HEAD 2>/dev/null | head -300 || git diff HEAD 2>/dev/null | head -300 || echo "(no diff)"
+    outputs:
+      result: ${{ steps.run.outputs.stdout }}
+
+  structure:
+    steps:
+      - id: run
+        uses: shell
+        run: |
+          dir="${{ inputs.directory }}"
+          cd "$dir"
+
+          echo "=== Project Structure ==="
+          echo "--- File tree (depth 3) ---"
+          find . -maxdepth 3 -not -path './.git/*' -not -path './node_modules/*' -not -path './vendor/*' -not -path './.venv/*' | head -80
+          echo ""
+
+          echo "--- Largest source files ---"
+          find . -type f \( -name '*.go' -o -name '*.js' -o -name '*.ts' -o -name '*.py' -o -name '*.rs' -o -name '*.java' \) \
+            -not -path './.git/*' -not -path './node_modules/*' -not -path './vendor/*' \
+            -exec wc -l {} + 2>/dev/null | sort -rn | head -15
+    outputs:
+      result: ${{ steps.run.outputs.stdout }}
+
+  review:
+    needs: [lint, diff, structure]
+    steps:
+      - id: analyze
+        uses: agent
+        with:
+          agent: reviewer
+          prompt: |
+            Review this codebase:
+
+            ${{ jobs.lint.outputs.result }}
+
+            ${{ jobs.diff.outputs.result }}
+
+            ${{ jobs.structure.outputs.result }}
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              summary:
+                type: string
+                description: "Brief overall assessment (1-2 sentences)"
+              findings:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    severity:
+                      type: string
+                      enum: [critical, warning, info]
+                    category:
+                      type: string
+                      description: "e.g., bug, security, performance, maintainability"
+                    file:
+                      type: string
+                      description: "File path (if applicable)"
+                    message:
+                      type: string
+                      description: "Clear description of the finding"
+                  required: [severity, category, file, message]
+              recommendation:
+                type: string
+                description: "Top-priority action to take"
+            required: [summary, findings, recommendation]
+          max_iterations: 1
+    outputs:
+      result: ${{ steps.analyze.outputs.output }}
+
+  report:
+    needs: [review]
+    steps:
+      - id: format
+        uses: shell
+        run: |
+          echo "======================================"
+          echo "  Code Review Report"
+          echo "  Generated: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "======================================"
+          echo ""
+          result=$(cat <<'REED_EOF'
+          ${{ jobs.review.outputs.result }}
+          REED_EOF
+          )
+
+          echo "$result" | jq -r '
+            "Summary: \(.summary)",
+            "",
+            "Findings:",
+            (.findings[] | "  [\(.severity | ascii_upcase)] [\(.category)] \(.file // "-"): \(.message)"),
+            "",
+            "Recommendation: \(.recommendation)"
+          ' 2>/dev/null || echo "$result"
+    outputs:
+      report: ${{ steps.format.outputs.stdout }}
+
+outputs:
+  report: ${{ jobs.report.outputs.report }}

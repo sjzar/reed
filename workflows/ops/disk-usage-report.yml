@@ -1,0 +1,71 @@
+name: disk-usage-report
+
+description: >
+  Report largest directories and files, identifying disk usage hotspots.
+
+inputs:
+  path:
+    type: string
+    default: "."
+    description: "Directory to analyze"
+  depth:
+    type: integer
+    default: 2
+    description: "Directory depth to report"
+  count:
+    type: integer
+    default: 20
+    description: "Number of top entries to show"
+
+jobs:
+  report:
+    steps:
+      - id: directories
+        uses: shell
+        run: |
+          echo "=== Largest Directories (depth ${{ inputs.depth }}) ==="
+          du -h -d ${{ inputs.depth }} "${{ inputs.path }}" 2>/dev/null \
+            | sort -hr \
+            | head -${{ inputs.count }}
+      - id: files
+        uses: shell
+        run: |
+          echo "=== Largest Files ==="
+          if [ "$(uname)" = "Darwin" ]; then
+            find "${{ inputs.path }}" -type f -exec stat -f '%z %N' {} \; 2>/dev/null \
+              | sort -rn \
+              | head -${{ inputs.count }} \
+              | awk '{
+                  size=$1; file=$2;
+                  if (size >= 1073741824) printf "%8.2f GB  %s\n", size/1073741824, file;
+                  else if (size >= 1048576) printf "%8.2f MB  %s\n", size/1048576, file;
+                  else printf "%8.2f KB  %s\n", size/1024, file;
+                }'
+          else
+            find "${{ inputs.path }}" -type f -printf '%s %p\n' 2>/dev/null \
+              | sort -rn \
+              | head -${{ inputs.count }} \
+              | awk '{
+                  size=$1; file=$2;
+                  if (size >= 1073741824) printf "%8.2f GB  %s\n", size/1073741824, file;
+                  else if (size >= 1048576) printf "%8.2f MB  %s\n", size/1048576, file;
+                  else printf "%8.2f KB  %s\n", size/1024, file;
+                }'
+          fi
+      - id: overview
+        uses: shell
+        run: |
+          echo "=== Disk Overview ==="
+          df -h "${{ inputs.path }}" 2>/dev/null || df -h
+          echo ""
+          total=$(du -sh "${{ inputs.path }}" 2>/dev/null | cut -f1)
+          echo "Total size of ${{ inputs.path }}: $total"
+    outputs:
+      directories: ${{ steps.directories.outputs.stdout }}
+      files: ${{ steps.files.outputs.stdout }}
+      overview: ${{ steps.overview.outputs.stdout }}
+
+outputs:
+  directories: ${{ jobs.report.outputs.directories }}
+  files: ${{ jobs.report.outputs.files }}
+  overview: ${{ jobs.report.outputs.overview }}

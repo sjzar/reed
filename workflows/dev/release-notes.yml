@@ -1,0 +1,147 @@
+name: release-notes
+
+description: >
+  Generate release notes from git history. Shell collects commits and diff stats
+  between tags, agent categorizes them with structured output, shell renders markdown.
+
+inputs:
+  from:
+    type: string
+    default: ""
+    description: "Start tag/ref (empty = previous tag auto-detected)"
+  to:
+    type: string
+    default: "HEAD"
+    description: "End tag/ref"
+
+agents:
+  categorizer:
+    system_prompt: |
+      You are a release notes writer. Given a list of git commits and diff stats,
+      categorize each change and produce structured release notes. Use clear,
+      user-facing language — not commit-message jargon. Group related commits
+      into single entries when they represent one logical change.
+
+jobs:
+  collect:
+    steps:
+      - id: commits
+        uses: shell
+        run: |
+          from="${{ inputs.from }}"
+          to="${{ inputs.to }}"
+
+          if [ -z "$from" ]; then
+            # Auto-detect previous tag
+            from=$(git describe --tags --abbrev=0 "$to^" 2>/dev/null || echo "")
+            if [ -z "$from" ]; then
+              echo "=== All commits (no previous tag found) ==="
+              git log --oneline --no-merges "$to" 2>/dev/null | head -100
+              echo ""
+              echo "=== Diff Stats ==="
+              git diff --stat --shortstat HEAD~20..HEAD 2>/dev/null || echo "(no stats)"
+              exit 0
+            fi
+          fi
+
+          echo "=== Commits: $from..$to ==="
+          git log --oneline --no-merges "$from..$to" 2>/dev/null | head -100
+          echo ""
+          echo "=== Diff Stats ==="
+          git diff --stat --shortstat "$from..$to" 2>/dev/null || echo "(no stats)"
+          echo ""
+          echo "=== Range ==="
+          echo "From: $from"
+          echo "To: $to"
+    outputs:
+      data: ${{ steps.commits.outputs.stdout }}
+
+  categorize:
+    needs: [collect]
+    steps:
+      - id: classify
+        uses: agent
+        with:
+          agent: categorizer
+          prompt: |
+            Generate release notes from these commits:
+
+            ${{ jobs.collect.outputs.data }}
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              version_summary:
+                type: string
+                description: "One-sentence summary of this release"
+              features:
+                type: array
+                items:
+                  type: string
+                description: "New features and capabilities"
+              fixes:
+                type: array
+                items:
+                  type: string
+                description: "Bug fixes"
+              breaking:
+                type: array
+                items:
+                  type: string
+                description: "Breaking changes (empty if none)"
+              other:
+                type: array
+                items:
+                  type: string
+                description: "Refactoring, docs, chores, etc."
+            required: [version_summary, features, fixes, breaking, other]
+          max_iterations: 1
+    outputs:
+      result: ${{ steps.classify.outputs.output }}
+
+  format:
+    needs: [categorize]
+    steps:
+      - id: render
+        uses: shell
+        run: |
+          result=$(cat <<'REED_EOF'
+          ${{ jobs.categorize.outputs.result }}
+          REED_EOF
+          )
+
+          echo "$result" | jq -r '
+            "# Release Notes",
+            "",
+            .version_summary,
+            "",
+            if (.breaking | length) > 0 then
+              "## Breaking Changes",
+              "",
+              (.breaking[] | "- \(.)"),
+              ""
+            else empty end,
+            if (.features | length) > 0 then
+              "## Features",
+              "",
+              (.features[] | "- \(.)"),
+              ""
+            else empty end,
+            if (.fixes | length) > 0 then
+              "## Fixes",
+              "",
+              (.fixes[] | "- \(.)"),
+              ""
+            else empty end,
+            if (.other | length) > 0 then
+              "## Other Changes",
+              "",
+              (.other[] | "- \(.)"),
+              ""
+            else empty end
+          ' 2>/dev/null || echo "$result"
+    outputs:
+      notes: ${{ steps.render.outputs.stdout }}
+
+outputs:
+  notes: ${{ jobs.format.outputs.notes }}

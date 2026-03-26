@@ -1,0 +1,90 @@
+name: log-analyze
+
+description: >
+  Extract error patterns from log files and identify root causes with AI analysis.
+
+inputs:
+  path:
+    type: string
+    required: true
+    description: "Path to the log file or directory"
+  pattern:
+    type: string
+    default: "error|ERROR|Error|fatal|FATAL|panic|PANIC|exception|Exception"
+    description: "Grep pattern to extract relevant lines"
+  lines:
+    type: integer
+    default: 500
+    description: "Maximum number of matching lines to analyze"
+
+agents:
+  log_analyst:
+    system_prompt: |
+      You are a log analysis expert. Given extracted log lines, identify:
+      1. Distinct error categories (group similar errors)
+      2. Frequency of each category
+      3. Timeline patterns (increasing, decreasing, periodic)
+      4. Likely root causes for the most common errors
+      5. Recommended actions
+
+      Be specific — cite exact error messages and timestamps.
+      Present findings in a structured format.
+
+jobs:
+  extract:
+    steps:
+      - id: errors
+        uses: shell
+        run: |
+          path="${{ inputs.path }}"
+          pattern="${{ inputs.pattern }}"
+          limit="${{ inputs.lines }}"
+          echo "=== Log Analysis: $path ==="
+          if [ -d "$path" ]; then
+            grep -rn -E "$pattern" "$path" 2>/dev/null | tail -"$limit"
+          else
+            grep -n -E "$pattern" "$path" 2>/dev/null | tail -"$limit"
+          fi
+      - id: stats
+        uses: shell
+        run: |
+          path="${{ inputs.path }}"
+          pattern="${{ inputs.pattern }}"
+          echo "=== Statistics ==="
+          if [ -d "$path" ]; then
+            total=$(grep -rc -E "$pattern" "$path" 2>/dev/null | awk -F: '{s+=$2} END {print s+0}')
+          else
+            total=$(grep -c -E "$pattern" "$path" 2>/dev/null || echo "0")
+          fi
+          echo "Total matching lines: $total"
+          echo ""
+          echo "=== Top Patterns ==="
+          if [ -d "$path" ]; then
+            grep -rh -E "$pattern" "$path" 2>/dev/null | sed 's/[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}[T ][0-9:.]*//g' | sort | uniq -c | sort -rn | head -20
+          else
+            grep -E "$pattern" "$path" 2>/dev/null | sed 's/[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}[T ][0-9:.]*//g' | sort | uniq -c | sort -rn | head -20
+          fi
+    outputs:
+      errors: ${{ steps.errors.outputs.stdout }}
+      stats: ${{ steps.stats.outputs.stdout }}
+
+  analyze:
+    needs: [extract]
+    steps:
+      - id: analysis
+        uses: agent
+        with:
+          agent: log_analyst
+          prompt: |
+            Analyze these log errors:
+
+            ${{ jobs.extract.outputs.stats }}
+
+            Matching log lines:
+            ${{ jobs.extract.outputs.errors }}
+    outputs:
+      analysis: ${{ steps.analysis.outputs.output }}
+
+outputs:
+  stats: ${{ jobs.extract.outputs.stats }}
+  analysis: ${{ jobs.analyze.outputs.analysis }}

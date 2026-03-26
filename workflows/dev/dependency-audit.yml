@@ -1,0 +1,98 @@
+name: dependency-audit
+
+description: >
+  Check for outdated and vulnerable dependencies across package managers.
+
+inputs:
+  directory:
+    type: string
+    default: "."
+    description: "Project root directory"
+
+jobs:
+  audit:
+    steps:
+      - id: detect
+        uses: shell
+        run: |
+          cd "${{ inputs.directory }}"
+          managers=""
+          [ -f "go.mod" ] && managers="$managers go"
+          [ -f "package.json" ] && managers="$managers node"
+          [ -f "requirements.txt" ] && managers="$managers pip"
+          [ -f "pyproject.toml" ] && managers="$managers pip"
+          [ -f "Cargo.toml" ] && managers="$managers cargo"
+          [ -f "Gemfile" ] && managers="$managers gem"
+          echo "${managers:-none}"
+      - id: check
+        uses: shell
+        run: |
+          cd "${{ inputs.directory }}"
+          managers="${{ trim(steps.detect.outputs.stdout) }}"
+          for mgr in $managers; do
+            echo "==============================="
+            echo "  Package Manager: $mgr"
+            echo "==============================="
+            case "$mgr" in
+              go)
+                echo "--- Outdated ---"
+                go list -m -u all 2>&1 | grep '\[' | head -30
+                echo ""
+                echo "--- Vulnerabilities ---"
+                if command -v govulncheck >/dev/null 2>&1; then
+                  govulncheck ./... 2>&1 | tail -20
+                else
+                  echo "SKIP: govulncheck not installed"
+                fi
+                ;;
+              node)
+                echo "--- Outdated ---"
+                npm outdated 2>&1 | head -30
+                echo ""
+                echo "--- Vulnerabilities ---"
+                npm audit --omit=dev 2>&1 | tail -20
+                ;;
+              pip)
+                echo "--- Outdated ---"
+                if command -v pip >/dev/null 2>&1; then
+                  pip list --outdated 2>&1 | head -30
+                fi
+                echo ""
+                echo "--- Vulnerabilities ---"
+                if command -v pip-audit >/dev/null 2>&1; then
+                  pip-audit 2>&1 | tail -20
+                else
+                  echo "SKIP: pip-audit not installed"
+                fi
+                ;;
+              cargo)
+                echo "--- Outdated ---"
+                cargo outdated 2>&1 | head -30 || echo "SKIP: cargo-outdated not installed"
+                echo ""
+                echo "--- Vulnerabilities ---"
+                cargo audit 2>&1 | tail -20 || echo "SKIP: cargo-audit not installed"
+                ;;
+              gem)
+                echo "--- Outdated ---"
+                bundle outdated 2>&1 | head -30 || echo "SKIP: bundler not available"
+                echo ""
+                echo "--- Vulnerabilities ---"
+                if command -v bundle-audit >/dev/null 2>&1; then
+                  bundle-audit check 2>&1 | tail -20
+                else
+                  echo "SKIP: bundle-audit not installed"
+                fi
+                ;;
+              none)
+                echo "No supported package manager found."
+                ;;
+            esac
+            echo ""
+          done
+    outputs:
+      managers: ${{ steps.detect.outputs.stdout }}
+      report: ${{ steps.check.outputs.stdout }}
+
+outputs:
+  managers: ${{ jobs.audit.outputs.managers }}
+  report: ${{ jobs.audit.outputs.report }}

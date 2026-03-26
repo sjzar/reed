@@ -1,0 +1,57 @@
+name: chat-api
+
+description: >
+  HTTP chat API with persistent sessions. Send messages via POST and
+  receive AI responses. Sessions maintain conversation context via session_key.
+
+on:
+  service:
+    port: 8400
+    http:
+      - path: /chat
+        method: POST
+        inputs:
+          message:
+            type: string
+            description: "User message"
+          session_key:
+            type: string
+            default: "default"
+            description: "Session key for conversation continuity"
+        outputs:
+          reply: ${{ jobs.respond.outputs.reply }}
+        concurrency:
+          group: ${{ inputs.session_key }}
+          behavior: queue
+
+inputs:
+  message:
+    type: string
+    required: true
+    description: "User message"
+  session_key:
+    type: string
+    default: "default"
+    description: "Session key for conversation continuity"
+
+agents:
+  chat:
+    system_prompt: |
+      You are a helpful assistant. Respond to user messages conversationally.
+      Be concise and helpful. If the user asks about your capabilities,
+      explain that you are a Reed workflow-powered chat API.
+
+jobs:
+  respond:
+    steps:
+      - id: reply
+        uses: agent
+        with:
+          agent: chat
+          prompt: ${{ inputs.message }}
+          session_key: ${{ inputs.session_key }}
+    outputs:
+      reply: ${{ steps.reply.outputs.output }}
+
+outputs:
+  reply: ${{ jobs.respond.outputs.reply }}

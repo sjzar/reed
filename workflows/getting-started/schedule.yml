@@ -1,0 +1,36 @@
+name: schedule
+
+description: >
+  Heartbeat workflow that runs on a cron schedule. Prints a timestamp,
+  checks disk usage, and logs the result. Demonstrates on.schedule trigger.
+
+on:
+  schedule:
+    - cron: "*/1 * * * *"
+
+jobs:
+  heartbeat:
+    steps:
+      - id: timestamp
+        uses: shell
+        run: echo "Heartbeat at $(date '+%Y-%m-%d %H:%M:%S')"
+
+      - id: disk
+        uses: shell
+        run: |
+          usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%')
+          avail=$(df -h / 2>/dev/null | awk 'NR==2 {print $4}')
+          echo "Disk: ${usage}% used, ${avail} free"
+
+      - id: log
+        uses: shell
+        run: |
+          echo "=== Heartbeat Log ==="
+          echo "Time: ${{ steps.timestamp.outputs.stdout }}"
+          echo "${{ steps.disk.outputs.stdout }}"
+          echo "Status: alive"
+    outputs:
+      log: ${{ steps.log.outputs.stdout }}
+
+outputs:
+  log: ${{ jobs.heartbeat.outputs.log }}

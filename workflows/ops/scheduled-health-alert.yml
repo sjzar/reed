@@ -1,0 +1,214 @@
+name: scheduled-health-alert
+
+description: >
+  Flagship showcase: schedule + parallel DAG + agent triage + conditional alerting.
+  Probes disk, URLs, and certs concurrently on a 5-minute schedule. Agent
+  assesses overall health with structured output. Alert fires on degraded status.
+
+agents:
+  health_analyst:
+    system_prompt: |
+      You are a health monitoring analyst. Given disk, URL, and certificate
+      probe results, assess overall system health. Be concise and actionable.
+      Flag any probe failures with specific details.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+
+inputs:
+  urls:
+    type: string
+    default: "https://example.com"
+    description: "Comma-separated URLs to probe"
+  domains:
+    type: string
+    default: "example.com"
+    description: "Comma-separated domains for cert check"
+  alert_webhook:
+    type: string
+    default: ""
+    description: "Webhook URL to POST alerts to (empty = log only)"
+  disk_threshold:
+    type: string
+    default: "90"
+    description: "Disk usage percentage that triggers warning"
+
+jobs:
+  probe_disk:
+    steps:
+      - id: check
+        uses: shell
+        run: |
+          threshold="${{ inputs.disk_threshold }}"
+          usage=$(df -h / 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%')
+          avail=$(df -h / 2>/dev/null | awk 'NR==2 {print $4}')
+
+          status="ok"
+          if [ -n "$usage" ] && [ "$usage" -gt "$threshold" ]; then
+            status="fail"
+          fi
+
+          echo "{\"check\":\"disk\",\"usage\":\"${usage}%\",\"available\":\"${avail}\",\"status\":\"${status}\"}"
+    outputs:
+      result: ${{ steps.check.outputs.stdout }}
+
+  probe_urls:
+    steps:
+      - id: check
+        uses: shell
+        run: |
+          urls="${{ inputs.urls }}"
+          echo "["
+          first=true
+          IFS=',' read -ra ADDR <<< "$urls"
+          for url in "${ADDR[@]}"; do
+            url=$(echo "$url" | tr -d ' ')
+            [ -z "$url" ] && continue
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" 2>/dev/null || echo "000")
+            latency=$(curl -s -o /dev/null -w '%{time_total}' --max-time 10 "$url" 2>/dev/null || echo "0")
+            status="ok"
+            if [ "$code" -lt 200 ] || [ "$code" -ge 400 ]; then
+              status="fail"
+            fi
+            $first || echo ","
+            first=false
+            echo "  {\"url\":\"$url\",\"code\":$code,\"latency\":\"${latency}s\",\"status\":\"$status\"}"
+          done
+          echo "]"
+    outputs:
+      result: ${{ steps.check.outputs.stdout }}
+
+  probe_certs:
+    steps:
+      - id: check
+        uses: shell
+        run: |
+          domains="${{ inputs.domains }}"
+          echo "["
+          first=true
+          IFS=',' read -ra ADDR <<< "$domains"
+          for domain in "${ADDR[@]}"; do
+            domain=$(echo "$domain" | tr -d ' ')
+            [ -z "$domain" ] && continue
+            expiry=$(echo | openssl s_client -servername "$domain" -connect "$domain:443" 2>/dev/null \
+              | openssl x509 -noout -enddate 2>/dev/null \
+              | sed 's/notAfter=//')
+            days_left=""
+            status="ok"
+            if [ -n "$expiry" ]; then
+              exp_epoch=$(date -j -f "%b %d %T %Y %Z" "$expiry" "+%s" 2>/dev/null || date -d "$expiry" "+%s" 2>/dev/null || echo "0")
+              now_epoch=$(date "+%s")
+              if [ "$exp_epoch" -gt 0 ]; then
+                days_left=$(( (exp_epoch - now_epoch) / 86400 ))
+                if [ "$days_left" -lt 14 ]; then
+                  status="fail"
+                fi
+              fi
+            else
+              status="fail"
+              days_left="unknown"
+            fi
+            $first || echo ","
+            first=false
+            echo "  {\"domain\":\"$domain\",\"expires\":\"$expiry\",\"days_left\":\"$days_left\",\"status\":\"$status\"}"
+          done
+          echo "]"
+    outputs:
+      result: ${{ steps.check.outputs.stdout }}
+
+  evaluate:
+    needs: [probe_disk, probe_urls, probe_certs]
+    steps:
+      - id: ts
+        uses: shell
+        run: date -u '+%Y-%m-%dT%H:%M:%SZ'
+      - id: assess
+        uses: agent
+        with:
+          agent: health_analyst
+          prompt: |
+            Assess the health of this system based on probe results:
+
+            Disk: ${{ jobs.probe_disk.outputs.result }}
+
+            URLs: ${{ jobs.probe_urls.outputs.result }}
+
+            Certs: ${{ jobs.probe_certs.outputs.result }}
+
+            Timestamp: ${{ steps.ts.outputs.stdout }}
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              overall:
+                type: string
+                enum: [healthy, degraded, critical]
+                description: "Overall system status"
+              failures:
+                type: integer
+                description: "Number of failed probes"
+              summary:
+                type: string
+                description: "One-sentence health summary"
+              issues:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    probe:
+                      type: string
+                      description: "Which probe (disk, url, cert)"
+                    detail:
+                      type: string
+                      description: "What failed and why"
+                  required: [probe, detail]
+            required: [overall, failures, summary, issues]
+          max_iterations: 1
+    outputs:
+      report: ${{ steps.assess.outputs.output }}
+      overall: ${{ steps.assess.outputs.output }}
+
+  alert:
+    needs: [evaluate]
+    steps:
+      - id: should_alert
+        uses: shell
+        if: ${{ jobs.evaluate.outputs.overall contains 'degraded' || jobs.evaluate.outputs.overall contains 'critical' }}
+        run: |
+          webhook="${{ inputs.alert_webhook }}"
+          report=$(cat <<'REED_EOF'
+          ${{ jobs.evaluate.outputs.report }}
+          REED_EOF
+          )
+
+          echo "=== ALERT: Health Degraded ==="
+          echo "$report" | jq . 2>/dev/null || echo "$report"
+
+          if [ -n "$webhook" ]; then
+            echo "Sending alert to webhook..."
+          else
+            echo "(No webhook configured — alert logged only)"
+          fi
+
+      - id: send_webhook
+        uses: http
+        if: ${{ jobs.evaluate.outputs.overall contains 'degraded' || jobs.evaluate.outputs.overall contains 'critical' && inputs.alert_webhook != '' }}
+        with:
+          url: ${{ inputs.alert_webhook }}
+          method: POST
+          headers:
+            Content-Type: application/json
+          body: ${{ jobs.evaluate.outputs.report }}
+          success_on_http_error: true
+
+      - id: all_clear
+        uses: shell
+        if: ${{ jobs.evaluate.outputs.overall contains 'healthy' }}
+        run: echo "All probes healthy — no alert needed."
+    outputs:
+      status: ${{ steps.should_alert.outputs.stdout }}
+
+outputs:
+  report: ${{ jobs.evaluate.outputs.report }}

@@ -1,0 +1,66 @@
+name: multi-step
+
+description: >
+  Gather system info, analyze with an agent, and produce a report.
+  Demonstrates DAG dependencies and output passing between jobs.
+
+agents:
+  analyst:
+    system_prompt: |
+      You are a system health analyst. Given raw system information,
+      provide a brief health assessment with any concerns noted.
+
+jobs:
+  gather:
+    steps:
+      - id: sysinfo
+        uses: shell
+        run: |
+          echo "=== System Info ==="
+          echo "Hostname: $(hostname)"
+          echo "OS: $(uname -s) $(uname -r)"
+          echo "Uptime: $(uptime)"
+          echo ""
+          echo "=== Disk Usage ==="
+          df -h / 2>/dev/null || df -h
+          echo ""
+          echo "=== Memory ==="
+          if command -v free >/dev/null 2>&1; then
+            free -h
+          elif command -v vm_stat >/dev/null 2>&1; then
+            vm_stat
+          fi
+    outputs:
+      info: ${{ steps.sysinfo.outputs.stdout }}
+
+  analyze:
+    needs: [gather]
+    steps:
+      - id: assessment
+        uses: agent
+        with:
+          agent: analyst
+          prompt: |
+            Analyze this system information and provide a brief health summary:
+
+            ${{ jobs.gather.outputs.info }}
+    outputs:
+      report: ${{ steps.assessment.outputs.output }}
+
+  format:
+    needs: [analyze]
+    steps:
+      - id: output
+        uses: shell
+        run: |
+          echo "=============================="
+          echo "  System Health Report"
+          echo "  Generated: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "=============================="
+          echo ""
+          echo "${{ jobs.analyze.outputs.report }}"
+    outputs:
+      report: ${{ steps.output.outputs.stdout }}
+
+outputs:
+  report: ${{ jobs.format.outputs.report }}

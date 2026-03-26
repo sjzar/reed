@@ -1,0 +1,124 @@
+name: agent-pipeline
+
+description: >
+  Tutorial: the "skeleton + agent" pattern. Shell collects raw data,
+  agent classifies it with structured output, shell formats the result.
+  This is Reed's core value proposition — fixed flow + agent at decision points.
+
+# --- Why this pattern? ---
+# An agent *could* do everything here (read file, analyze, format).
+# But that causes context bloat and non-determinism. By keeping the
+# skeleton in shell, we get: repeatable collection, structured JSON
+# output, and a clean separation of "gather → decide → act".
+
+inputs:
+  file:
+    type: string
+    required: true
+    description: "Path to the file to analyze"
+
+agents:
+  classifier:
+    system_prompt: |
+      You are a file classifier. Given file metadata and a content preview,
+      produce a structured analysis. Be concise and precise.
+
+jobs:
+  # Step 1: Shell collects raw data (deterministic, no LLM tokens spent)
+  collect:
+    steps:
+      - id: metadata
+        uses: shell
+        run: |
+          file="${{ inputs.file }}"
+          if [ ! -f "$file" ]; then
+            echo "Error: file not found: $file" >&2
+            exit 1
+          fi
+
+          name=$(basename "$file")
+          size=$(wc -c < "$file" | tr -d ' ')
+          lines=$(wc -l < "$file" | tr -d ' ')
+          words=$(wc -w < "$file" | tr -d ' ')
+          ext="${name##*.}"
+
+          echo "=== File Metadata ==="
+          echo "Name: $name"
+          echo "Extension: $ext"
+          echo "Size: $size bytes"
+          echo "Lines: $lines"
+          echo "Words: $words"
+          echo ""
+          echo "=== Content Preview (first 30 lines) ==="
+          head -30 "$file"
+    outputs:
+      data: ${{ steps.metadata.outputs.stdout }}
+
+  # Step 2: Agent makes the decision (structured JSON output)
+  analyze:
+    needs: [collect]
+    steps:
+      - id: classify
+        uses: agent
+        with:
+          agent: classifier
+          prompt: |
+            Analyze this file and classify it:
+
+            ${{ jobs.collect.outputs.data }}
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              file_type:
+                type: string
+                description: "General file type (e.g., source_code, config, data, documentation, script)"
+              language:
+                type: string
+                description: "Programming language or format (e.g., Go, Python, JSON, Markdown, YAML)"
+              summary:
+                type: string
+                description: "One-sentence summary of the file's purpose"
+              complexity:
+                type: string
+                enum: [low, medium, high]
+                description: "Estimated complexity level"
+              tags:
+                type: array
+                items:
+                  type: string
+                description: "Relevant tags (e.g., build, test, config, api, cli)"
+            required: [file_type, language, summary, complexity, tags]
+          max_iterations: 1
+    outputs:
+      result: ${{ steps.classify.outputs.output }}
+
+  # Step 3: Shell formats the structured output (deterministic rendering)
+  report:
+    needs: [analyze]
+    steps:
+      - id: format
+        uses: shell
+        run: |
+          echo "======================================"
+          echo "  File Analysis Report"
+          echo "  Generated: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "======================================"
+          echo ""
+          result=$(cat <<'REED_EOF'
+          ${{ jobs.analyze.outputs.result }}
+          REED_EOF
+          )
+          echo "$result" | jq -r '
+            "Type:       \(.file_type)",
+            "Language:   \(.language)",
+            "Complexity: \(.complexity)",
+            "Summary:    \(.summary)",
+            "",
+            "Tags:       \(.tags | join(", "))"
+          ' 2>/dev/null || echo "$result"
+    outputs:
+      report: ${{ steps.format.outputs.stdout }}
+
+outputs:
+  report: ${{ jobs.report.outputs.report }}
