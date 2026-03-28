@@ -1,5 +1,3 @@
-//go:build !windows
-
 package memory
 
 import (
@@ -14,7 +12,6 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"github.com/sjzar/reed/internal/model"
-	"golang.org/x/sys/unix"
 )
 
 // FileProvider implements Provider backed by MEMORY.md files on disk.
@@ -162,10 +159,10 @@ func (p *FileProvider) withScopeLock(scopeKey string, fn func() error) error {
 	}
 	defer f.Close()
 
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+	if err := flockFile(f); err != nil {
 		return fmt.Errorf("acquire flock: %w", err)
 	}
-	defer unix.Flock(int(f.Fd()), unix.LOCK_UN) //nolint:errcheck
+	defer funlockFile(f) //nolint:errcheck
 
 	return fn()
 }

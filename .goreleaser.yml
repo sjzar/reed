@@ -1,0 +1,80 @@
+version: 2
+
+builds:
+  - main: ./main.go
+    binary: reed
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/sjzar/reed/pkg/version.Version={{ .Version }}
+    # --- CGO overrides (uncomment when switching to CGO) ---
+    # overrides:
+    #   - goos: darwin
+    #     goarch: amd64
+    #     env:
+    #       - CGO_ENABLED=1
+    #       - CC=o64-clang
+    #       - CXX=o64-clang++
+    #   - goos: darwin
+    #     goarch: arm64
+    #     env:
+    #       - CGO_ENABLED=1
+    #       - CC=aarch64-apple-darwin20.2-clang
+    #       - CXX=aarch64-apple-darwin20.2-clang++
+    #   - goos: linux
+    #     goarch: amd64
+    #     env:
+    #       - CGO_ENABLED=1
+    #       - CC=x86_64-linux-gnu-gcc
+    #       - CXX=x86_64-linux-gnu-g++
+    #   - goos: linux
+    #     goarch: arm64
+    #     env:
+    #       - CGO_ENABLED=1
+    #       - CC=aarch64-linux-gnu-gcc
+    #       - CXX=aarch64-linux-gnu-g++
+    #   - goos: windows
+    #     goarch: amd64
+    #     env:
+    #       - CGO_ENABLED=1
+    #       - CC=x86_64-w64-mingw32-gcc
+    #       - CXX=x86_64-w64-mingw32-g++
+    #   - goos: windows
+    #     goarch: arm64
+    #     env:
+    #       - CGO_ENABLED=1
+    #       - CC=/llvm-mingw/bin/aarch64-w64-mingw32-gcc
+    #       - CXX=/llvm-mingw/bin/aarch64-w64-mingw32-g++
+
+upx:
+  - enabled: true
+    compress: best
+    lzma: true
+
+archives:
+  - formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+release:
+  draft: true
+  prerelease: auto
